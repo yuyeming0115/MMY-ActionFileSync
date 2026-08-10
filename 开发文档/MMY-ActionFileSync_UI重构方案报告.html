@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MMY-ActionFileSync UI 重构方案报告</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #f4f6f8;
+      --surface: #ffffff;
+      --surface-2: #f7f9fb;
+      --line: #d8dee6;
+      --line-strong: #b9c2cd;
+      --text: #17212b;
+      --muted: #637083;
+      --source: #1769aa;
+      --source-soft: #e7f2fb;
+      --target: #a4510b;
+      --target-soft: #fff0e2;
+      --success: #237a45;
+      --danger: #b42318;
+      --warning: #9a6700;
+      --selected: #e9f2ff;
+      --shadow: 0 12px 32px rgba(22, 34, 51, .12);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--text);
+      font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.65;
+      letter-spacing: 0;
+    }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    .report-header {
+      background: #182433;
+      color: #fff;
+      padding: 34px max(24px, calc((100% - 1240px) / 2));
+      border-bottom: 4px solid #2882c7;
+    }
+    .report-header h1 { margin: 0 0 8px; font-size: 30px; font-weight: 600; }
+    .report-header p { margin: 0; color: #c9d3df; }
+    .report-nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      gap: 22px;
+      align-items: center;
+      padding: 10px max(24px, calc((100% - 1240px) / 2));
+      background: rgba(255,255,255,.96);
+      border-bottom: 1px solid var(--line);
+    }
+    .report-nav a { color: var(--muted); text-decoration: none; font-size: 14px; }
+    .report-nav a:hover { color: var(--source); }
+    main { max-width: 1240px; margin: 0 auto; padding: 34px 24px 64px; }
+    section { margin: 0 0 48px; }
+    h2 { margin: 0 0 16px; font-size: 23px; font-weight: 600; }
+    h3 { margin: 24px 0 8px; font-size: 17px; font-weight: 600; }
+    p { margin: 8px 0; }
+    .lead { max-width: 920px; color: #354252; font-size: 17px; }
+    .finding-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-top: 20px;
+    }
+    .finding {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 18px;
+    }
+    .finding b { display: block; margin-bottom: 6px; }
+    .finding p { margin: 0; color: var(--muted); font-size: 14px; }
+    .current-shot {
+      display: grid;
+      grid-template-columns: minmax(260px, .7fr) 1.3fr;
+      gap: 24px;
+      align-items: start;
+      margin-top: 20px;
+    }
+    .current-shot img {
+      display: block;
+      width: 100%;
+      max-height: 560px;
+      object-fit: contain;
+      object-position: top left;
+      background: #e5e8ec;
+      border: 1px solid var(--line);
+    }
+    .current-shot ul { margin: 0; padding-left: 22px; }
+    .current-shot li { margin-bottom: 10px; }
+    .prototype-note {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: center;
+      margin-bottom: 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .app-window {
+      overflow: hidden;
+      background: var(--surface);
+      border: 1px solid #9fa9b5;
+      border-radius: 7px;
+      box-shadow: var(--shadow);
+    }
+    .app-titlebar {
+      height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      background: #202b38;
+      color: #fff;
+      font-size: 13px;
+    }
+    .app-titlebar strong { font-weight: 500; }
+    .window-controls { color: #bac4cf; letter-spacing: 8px; }
+    .app-toolbar {
+      height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-2);
+      font-size: 13px;
+    }
+    .app-toolbar .state { color: var(--success); }
+    .icon-button, .soft-button, .primary-button, .seg-button, .row-action {
+      border: 1px solid var(--line-strong);
+      border-radius: 5px;
+      background: var(--surface);
+      color: var(--text);
+      min-height: 30px;
+      padding: 4px 10px;
+    }
+    .icon-button { width: 32px; padding: 0; font-size: 17px; }
+    .primary-button { background: #1769aa; color: #fff; border-color: #1769aa; font-weight: 500; }
+    .primary-button:disabled { background: #a9b2bd; border-color: #a9b2bd; cursor: default; }
+    .source-target {
+      display: grid;
+      grid-template-columns: 1fr 102px 1fr;
+      gap: 10px;
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .path-box {
+      min-width: 0;
+      padding: 9px 10px;
+      background: var(--surface-2);
+      border: 1px solid var(--line);
+      border-top-width: 4px;
+      border-radius: 5px;
+    }
+    .path-box.source { border-top-color: var(--source); }
+    .path-box.target { border-top-color: var(--target); }
+    .path-label { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; font-weight: 600; }
+    .source .path-label { color: var(--source); }
+    .target .path-label { color: var(--target); }
+    .path-value {
+      display: block;
+      overflow: hidden;
+      margin-top: 4px;
+      color: #4b5868;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .direction {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .direction b { color: #364554; font-size: 22px; line-height: 1; font-weight: 400; }
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(370px, 38%) 1fr;
+      min-height: 580px;
+    }
+    .action-pane { border-right: 1px solid var(--line); background: var(--surface); min-width: 0; }
+    .pane-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px 8px;
+    }
+    .pane-heading h3 { margin: 0; font-size: 15px; }
+    .pane-heading span { color: var(--muted); font-size: 12px; }
+    .filters { display: flex; gap: 2px; padding: 0 12px 8px; overflow-x: auto; }
+    .seg-button { border-color: transparent; background: transparent; padding: 3px 8px; white-space: nowrap; font-size: 12px; }
+    .seg-button.active { border-color: #87acd0; background: var(--source-soft); color: #104f82; }
+    .search-row { display: flex; gap: 6px; padding: 0 12px 10px; }
+    .search-row input {
+      width: 100%; min-width: 0; height: 32px; padding: 5px 9px;
+      border: 1px solid var(--line-strong); border-radius: 5px; color: var(--text); background: #fff;
+    }
+    .list-head, .action-row {
+      display: grid;
+      grid-template-columns: 34px minmax(120px, 1fr) 90px 86px 70px;
+      align-items: center;
+      min-height: 37px;
+      border-bottom: 1px solid #e5e9ee;
+    }
+    .list-head { min-height: 31px; color: var(--muted); background: var(--surface-2); font-size: 11px; }
+    .list-head > span, .action-row > span, .action-row > label { padding: 0 7px; min-width: 0; }
+    .action-row { cursor: pointer; font-size: 12px; }
+    .action-row:hover { background: #f6f9fc; }
+    .action-row.focused { background: var(--selected); box-shadow: inset 3px 0 0 var(--source); }
+    .action-row.hidden { display: none; }
+    .action-row input { width: 16px; height: 16px; accent-color: var(--source); }
+    .action-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+    .status { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+    .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
+    .status.new::before { background: var(--source); }
+    .status.same::before { background: var(--success); }
+    .status.target-only::before { background: var(--target); }
+    .row-number { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+    .frame-detail {
+      display: none;
+      padding: 6px 10px 8px 42px;
+      background: #f8fafc;
+      border-bottom: 1px solid var(--line);
+      font: 12px/1.8 Consolas, monospace;
+      color: #4d5a68;
+    }
+    .frame-detail.open { display: block; }
+    .frame-detail label { display: grid; grid-template-columns: 22px 1fr 72px; align-items: center; }
+    .frame-detail input { accent-color: var(--source); }
+    .empty-filter { display: none; padding: 28px; text-align: center; color: var(--muted); }
+    .preview-pane { display: flex; flex-direction: column; min-width: 0; background: #eef1f4; }
+    .preview-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 45px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+    .preview-heading strong { font-size: 14px; }
+    .mode-switch { display: flex; gap: 2px; }
+    .preview-grid { display: grid; grid-template-columns: 1fr 1fr; flex: 1; min-height: 0; }
+    .preview-side { display: flex; flex-direction: column; min-width: 0; }
+    .preview-side + .preview-side { border-left: 1px solid #bfc7d0; }
+    .preview-side.source-preview { box-shadow: inset 0 4px 0 var(--source); }
+    .preview-side.target-preview { box-shadow: inset 0 4px 0 var(--target); }
+    .preview-label {
+      display: flex; justify-content: space-between; gap: 8px; align-items: center;
+      min-height: 45px; padding: 8px 11px; background: #fff; border-bottom: 1px solid var(--line); font-size: 12px;
+    }
+    .preview-label b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .source-preview .preview-label b:first-child { color: var(--source); }
+    .target-preview .preview-label b:first-child { color: var(--target); }
+    .canvas {
+      position: relative;
+      display: grid;
+      place-items: center;
+      flex: 1;
+      min-height: 360px;
+      overflow: hidden;
+      background: #d9dee4;
+    }
+    .sprite {
+      position: relative;
+      width: min(58%, 190px);
+      aspect-ratio: 1;
+      border: 1px solid rgba(31, 43, 54, .3);
+      background: rgba(255,255,255,.42);
+    }
+    .sprite::before {
+      content: "";
+      position: absolute;
+      left: 50%; top: 24%;
+      width: 27%; height: 27%;
+      transform: translateX(-50%);
+      border-radius: 50%;
+      background: #34485c;
+    }
+    .sprite::after {
+      content: "";
+      position: absolute;
+      left: 50%; bottom: 13%;
+      width: 44%; height: 43%;
+      transform: translateX(-50%) skewX(-4deg);
+      border-radius: 40% 40% 18% 18%;
+      background: #54718d;
+      box-shadow: -36px 18px 0 -25px #34485c, 36px 18px 0 -25px #34485c;
+    }
+    .target-preview .sprite::after { background: #7c6a5a; }
+    .canvas-caption { position: absolute; bottom: 8px; left: 10px; color: #394653; font-size: 11px; }
+    .preview-meta { padding: 7px 10px; background: #fff; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+    .playback {
+      display: grid;
+      grid-template-columns: 32px 68px 1fr auto auto;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      background: #fff;
+      border-top: 1px solid var(--line);
+      font-size: 12px;
+    }
+    .playback input[type="range"] { width: 100%; accent-color: var(--source); }
+    .summary-bar {
+      min-height: 54px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 14px;
+      padding: 9px 12px;
+      border-top: 1px solid var(--line-strong);
+      background: #fff;
+    }
+    .selection-summary { font-size: 13px; }
+    .selection-summary strong { color: var(--source); }
+    .summary-actions { display: flex; gap: 7px; }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0;
+      margin-top: 18px;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+    .flow-step { position: relative; padding: 18px 16px; border-right: 1px solid var(--line); }
+    .flow-step:last-child { border-right: 0; }
+    .flow-step b { display: block; font-size: 14px; }
+    .flow-step span { color: var(--muted); font-size: 12px; }
+    .flow-step::after { content: "›"; position: absolute; right: -7px; top: 28px; z-index: 2; color: var(--source); background: #fff; font-size: 20px; }
+    .flow-step:last-child::after { display: none; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid var(--line); }
+    th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { background: var(--surface-2); color: #425064; font-size: 13px; font-weight: 600; }
+    td { font-size: 14px; }
+    .phase { color: var(--source); font-weight: 600; white-space: nowrap; }
+    .report-footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 18px; }
+    .runtime-shot {
+      display: block;
+      width: 100%;
+      border: 1px solid var(--line-strong);
+      background: var(--surface);
+    }
+
+    @media (max-width: 900px) {
+      .finding-grid, .current-shot { grid-template-columns: 1fr; }
+      .workspace { grid-template-columns: 1fr; }
+      .action-pane { border-right: 0; border-bottom: 1px solid var(--line); }
+      .source-target { grid-template-columns: 1fr; }
+      .direction { flex-direction: row; gap: 8px; }
+      .direction b { transform: rotate(90deg); }
+      .flow { grid-template-columns: 1fr; }
+      .flow-step { border-right: 0; border-bottom: 1px solid var(--line); }
+      .flow-step::after { display: none; }
+    }
+    @media (max-width: 620px) {
+      main { padding: 24px 12px 48px; }
+      .report-header { padding: 24px 16px; }
+      .report-header h1 { font-size: 24px; }
+      .report-nav { padding: 9px 12px; gap: 13px; overflow-x: auto; white-space: nowrap; }
+      .app-toolbar { height: auto; padding: 7px 9px; }
+      .workspace { min-height: 0; }
+      .preview-grid { grid-template-columns: 1fr; }
+      .preview-side + .preview-side { border-left: 0; border-top: 1px solid #bfc7d0; }
+      .canvas { min-height: 250px; }
+      .list-head, .action-row { grid-template-columns: 32px minmax(100px, 1fr) 84px 64px; }
+      .list-head span:nth-child(4), .action-row span:nth-child(4) { display: none; }
+      .playback { grid-template-columns: 32px 58px 1fr; }
+      .playback span:nth-last-child(-n+2) { display: none; }
+      .summary-bar { align-items: stretch; flex-direction: column; }
+      .summary-actions { display: grid; grid-template-columns: 1fr 1fr; }
+      .current-shot img { max-height: 420px; }
+      .prototype-note { align-items: flex-start; flex-direction: column; }
+      table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header class="report-header">
+    <h1>MMY-ActionFileSync UI 重构方案</h1>
+    <p>将“双树对照工具”重组为“动作选择与动画校对工作台” · 2026-08-10</p>
+  </header>
+
+  <nav class="report-nav" aria-label="报告目录">
+    <a href="#conclusion">结论</a>
+    <a href="#diagnosis">现状诊断</a>
+    <a href="#prototype">新版原型</a>
+    <a href="#workflow">操作流程</a>
+    <a href="#delivery">实施计划</a>
+  </nav>
+
+  <main>
+    <section id="conclusion">
+      <h2>核心结论</h2>
+      <p class="lead">保留双动画并排预览，但取消两棵重复文件树。左侧改为一张可直接勾选的动作差异清单，右侧固定显示“来源 / 目标”动画对比，底部只保留本次传输摘要与主操作。动作目录默认聚合显示，帧文件按需展开。</p>
+      <div class="finding-grid">
+        <div class="finding"><b>不再依赖“左 / 右”记忆</b><p>全程使用“来源：新动作目录 → 目标：SVN”，预览标题和状态文案保持一致。</p></div>
+        <div class="finding"><b>差异再多也先看动作</b><p>主清单每个动作只占一行，几十帧或数百帧被聚合为数量与大小，需要时再展开。</p></div>
+        <div class="finding"><b>单独或批量更新更直接</b><p>搜索、单行勾选、Ctrl/Shift 多选和批量勾选都在同一块清单中，选择范围在底部实时汇总。</p></div>
+      </div>
+    </section>
+
+    <section id="diagnosis">
+      <h2>现状诊断</h2>
+      <div class="current-shot">
+        <img src="../2026-08-10 11-46-50 剪贴板图片.png" alt="当前 MMY-ActionFileSync 界面截图">
+        <div>
+          <h3>版面</h3>
+          <ul>
+            <li>默认窗口只有 600 px 宽，两棵包含“名称 / 大小 / 状态”的树继续均分宽度，长名称和角色信息都容易被压缩。</li>
+            <li>动作筛选、传输按钮、两条进度条位于树和预览之间，把最重要的文件浏览与动画对比分隔开。</li>
+            <li>预览画布自身需要较大高度，单列堆叠让动作列表可见行数不足。</li>
+          </ul>
+          <h3>选择逻辑</h3>
+          <ul>
+            <li>树的当前行决定预览，独立复选框决定传输，用户必须跨区域确认两种状态。</li>
+            <li>全不选之后，树仍可能重新显示全部动作，但实际传输范围为空，容易产生误判。</li>
+            <li>传输层按多个差异节点递归收集再去重，无法在主界面明确表达动作内的文件级排除。</li>
+          </ul>
+          <h3>信息语义</h3>
+          <ul>
+            <li>“仅左侧 / 仅右侧”描述的是布局，不是“新增待传 / 目标独有”这种任务结果。</li>
+            <li>来源与目标只在局部标题中出现，缺少持续可见的单向传输提示。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="prototype">
+      <div class="prototype-note">
+        <div><strong>可交互新版原型</strong>：搜索 `idle`、切换状态、选择动作、展开帧文件并观察底部汇总。</div>
+        <div>推荐桌面尺寸 1440 × 900 · 最小 1100 × 720</div>
+      </div>
+
+      <div class="app-window" role="application" aria-label="MMY-ActionFileSync 新版界面原型">
+        <div class="app-titlebar">
+          <strong>MMY Action File Sync</strong>
+          <span class="window-controls" aria-hidden="true">— □ ×</span>
+        </div>
+        <div class="app-toolbar">
+          <span class="state">● 扫描完成 · 6 个动作待更新</span>
+          <span><button class="soft-button" type="button">刷新对比</button> <button class="icon-button" type="button" aria-label="设置">⚙</button></span>
+        </div>
+        <div class="source-target">
+          <div class="path-box source">
+            <span class="path-label"><span>来源｜新动作目录</span><span>只读</span></span>
+            <span class="path-value">D:/Animation/Export/Player</span>
+          </div>
+          <div class="direction"><b>→</b><span>复制到</span></div>
+          <div class="path-box target">
+            <span class="path-label"><span>目标｜SVN 工作目录</span><span>将覆盖</span></span>
+            <span class="path-value">D:/SVN/Game/Assets/Player</span>
+          </div>
+        </div>
+
+        <div class="workspace">
+          <aside class="action-pane" aria-label="动作差异清单">
+            <div class="pane-heading"><h3>动作差异清单</h3><span id="visibleCount">6 个待更新</span></div>
+            <div class="filters" role="group" aria-label="状态筛选">
+              <button class="seg-button active" type="button" data-filter="transfer">待更新 6</button>
+              <button class="seg-button" type="button" data-filter="new">新增 2</button>
+              <button class="seg-button" type="button" data-filter="different">内容变更 4</button>
+              <button class="seg-button" type="button" data-filter="same">已一致 18</button>
+              <button class="seg-button" type="button" data-filter="all">全部 27</button>
+            </div>
+            <div class="search-row">
+              <input id="actionSearch" type="search" placeholder="搜索动作或相对路径" aria-label="搜索动作">
+              <button id="selectCurrent" class="soft-button" type="button">仅勾选高亮</button>
+            </div>
+            <div class="list-head" aria-hidden="true"><span></span><span>动作</span><span>状态</span><span>变化</span><span>大小</span></div>
+            <div id="actionList">
+              <div class="action-block" data-status="different" data-name="attack">
+                <div class="action-row" data-action="attack" data-files="62" data-size="18.6">
+                  <label><input type="checkbox" aria-label="选择 attack"></label><span class="action-name">▸ attack</span><span class="status">内容变更</span><span class="row-number">~ 8 帧</span><span class="row-number">18.6 MB</span>
+                </div>
+              </div>
+              <div class="action-block" data-status="different" data-name="idle">
+                <div class="action-row focused" data-action="idle" data-files="48" data-size="12.4" data-expandable="true">
+                  <label><input type="checkbox" aria-label="选择 idle"></label><span class="action-name">▾ idle</span><span class="status">内容变更</span><span class="row-number">+3 ~5</span><span class="row-number">12.4 MB</span>
+                </div>
+                <div class="frame-detail open">
+                  <label><input type="checkbox" data-child="idle"><span>idle_001.png</span><span>256 KB</span></label>
+                  <label><input type="checkbox" data-child="idle"><span>idle_002.png</span><span>261 KB</span></label>
+                  <label><input type="checkbox" data-child="idle"><span>idle_003.png</span><span>258 KB</span></label>
+                  <span>… 其余 45 帧按需加载</span>
+                </div>
+              </div>
+              <div class="action-block" data-status="new" data-name="jump">
+                <div class="action-row" data-action="jump" data-files="31" data-size="8.2">
+                  <label><input type="checkbox" aria-label="选择 jump"></label><span class="action-name">▸ jump</span><span class="status new">新增待传</span><span class="row-number">+31 帧</span><span class="row-number">8.2 MB</span>
+                </div>
+              </div>
+              <div class="action-block" data-status="different" data-name="run">
+                <div class="action-row" data-action="run" data-files="56" data-size="14.9">
+                  <label><input type="checkbox" aria-label="选择 run"></label><span class="action-name">▸ run</span><span class="status">内容变更</span><span class="row-number">~12 帧</span><span class="row-number">14.9 MB</span>
+                </div>
+              </div>
+              <div class="action-block" data-status="new" data-name="skill_01">
+                <div class="action-row" data-action="skill_01" data-files="72" data-size="21.3">
+                  <label><input type="checkbox" aria-label="选择 skill_01"></label><span class="action-name">▸ skill_01</span><span class="status new">新增待传</span><span class="row-number">+72 帧</span><span class="row-number">21.3 MB</span>
+                </div>
+              </div>
+              <div class="action-block" data-status="different" data-name="walk">
+                <div class="action-row" data-action="walk" data-files="44" data-size="11.7">
+                  <label><input type="checkbox" aria-label="选择 walk"></label><span class="action-name">▸ walk</span><span class="status">内容变更</span><span class="row-number">~ 6 帧</span><span class="row-number">11.7 MB</span>
+                </div>
+              </div>
+              <div class="action-block" data-status="same" data-name="death">
+                <div class="action-row" data-action="death" data-files="0" data-size="0">
+                  <label><input type="checkbox" disabled aria-label="death 已一致"></label><span class="action-name">▸ death</span><span class="status same">已一致</span><span class="row-number">0</span><span class="row-number">—</span>
+                </div>
+              </div>
+              <div class="empty-filter" id="emptyFilter">没有匹配的动作</div>
+            </div>
+          </aside>
+
+          <section class="preview-pane" aria-label="双动画对比预览">
+            <div class="preview-heading">
+              <strong>同步动画对比</strong>
+              <div class="mode-switch"><button class="seg-button active" type="button">并排</button><button class="seg-button" type="button">叠加闪烁</button></div>
+            </div>
+            <div class="preview-grid">
+              <div class="preview-side source-preview">
+                <div class="preview-label"><b>来源｜新动作</b><b class="currentAction">idle</b></div>
+                <div class="canvas"><div class="sprite" aria-hidden="true"></div><span class="canvas-caption">来源帧 18 / 48</span></div>
+                <div class="preview-meta">512 × 512 · PNG 序列 · 12.4 MB</div>
+              </div>
+              <div class="preview-side target-preview">
+                <div class="preview-label"><b>目标｜SVN</b><b class="currentAction">idle</b></div>
+                <div class="canvas"><div class="sprite" aria-hidden="true"></div><span class="canvas-caption">目标帧 18 / 45</span></div>
+                <div class="preview-meta">512 × 512 · PNG 序列 · 11.6 MB</div>
+              </div>
+            </div>
+            <div class="playback">
+              <button id="playButton" class="icon-button" type="button" aria-label="播放或暂停">Ⅱ</button>
+              <span>18 / 48</span>
+              <input type="range" min="1" max="48" value="18" aria-label="动画帧">
+              <span>缩放 100%</span><span>Y 位移 +50</span>
+            </div>
+          </section>
+        </div>
+
+        <div class="summary-bar">
+          <div id="selectionSummary" class="selection-summary">未选择任何文件</div>
+          <div class="summary-actions">
+            <button id="clearSelection" class="soft-button" type="button">清空选择</button>
+            <button id="transferButton" class="primary-button" type="button" disabled>传输预览并开始</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="implementation">
+      <h2>重构后实际运行界面</h2>
+      <p class="lead">以下截图由 PySide6 6.11.1 在 1442 × 842 窗口中实际渲染，包含固定的选择/方向/目录/动作列、Ctrl/Shift 多行高亮、批量文件选择和同步双预览。</p>
+      <img class="runtime-shot" src="MMY-ActionFileSync_UI运行截图.png" alt="MMY-ActionFileSync 重构后实际运行界面">
+    </section>
+
+    <section id="workflow">
+      <h2>单独更新 idle 的目标流程</h2>
+      <div class="flow">
+        <div class="flow-step"><b>1. 搜索</b><span>输入 idle，清单只保留匹配动作</span></div>
+        <div class="flow-step"><b>2. 校对</b><span>单击该行，右侧同步加载双预览</span></div>
+        <div class="flow-step"><b>3. 选择</b><span>勾选动作，或批量勾选高亮行</span></div>
+        <div class="flow-step"><b>4. 确认</b><span>核对动作、文件数和总大小</span></div>
+        <div class="flow-step"><b>5. 传输</b><span>预览最终清单后复制到 SVN</span></div>
+      </div>
+    </section>
+
+    <section id="delivery">
+      <h2>实施计划</h2>
+      <p class="lead">以下四个阶段已在本地工作区完成首轮实现；该原型继续作为版面与交互验收基准。</p>
+      <table>
+        <thead><tr><th>阶段</th><th>主要改动</th><th>验收重点</th></tr></thead>
+        <tbody>
+          <tr><td class="phase">1. 模型</td><td>建立动作级差异模型、独立选择集合、精确文件任务生成。</td><td>筛选不改变选择；同一文件不会重复进入任务。</td></tr>
+          <tr><td class="phase">2. 布局</td><td>来源/目标栏、单动作清单、QSplitter、底部摘要栏。</td><td>1440 × 900 可见至少 18 个动作行和完整双预览。</td></tr>
+          <tr><td class="phase">3. 预览与确认</td><td>共享播放进度、帧数映射、可排除文件的传输预览。</td><td>双侧始终可比较，确认清单与实际传输完全一致。</td></tr>
+          <tr><td class="phase">4. 性能</td><td>文件行懒加载、代理模型筛选、界面状态记忆。</td><td>数百动作和数万帧下仍可流畅搜索、展开和勾选。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer class="report-footer">本报告基于本地项目代码与界面截图整理。对应 PySide6 重构已于 2026-08-10 完成首轮实现，最终显示效果以安装完整依赖后的应用验收结果为准。</footer>
+  </main>
+
+  <script>
+    (() => {
+      const search = document.getElementById('actionSearch');
+      const blocks = [...document.querySelectorAll('.action-block')];
+      const filterButtons = [...document.querySelectorAll('[data-filter]')];
+      const visibleCount = document.getElementById('visibleCount');
+      const emptyFilter = document.getElementById('emptyFilter');
+      const selectionSummary = document.getElementById('selectionSummary');
+      const transferButton = document.getElementById('transferButton');
+      let activeFilter = 'transfer';
+      let focusedRow = document.querySelector('.action-row.focused');
+      let lastFocusedRow = focusedRow;
+
+      function applyFilter() {
+        const term = search.value.trim().toLowerCase();
+        let count = 0;
+        blocks.forEach(block => {
+          const status = block.dataset.status;
+          const filterMatch = activeFilter === 'all' ||
+            (activeFilter === 'transfer' && (status === 'new' || status === 'different')) ||
+            status === activeFilter;
+          const searchMatch = block.dataset.name.includes(term);
+          const show = filterMatch && searchMatch;
+          block.hidden = !show;
+          if (show) count += 1;
+        });
+        visibleCount.textContent = `${count} 个可见动作`;
+        emptyFilter.style.display = count ? 'none' : 'block';
+      }
+
+      function updateSelection() {
+        const checkedRows = blocks.map(block => block.querySelector('.action-row')).filter(row => {
+          const box = row.querySelector('input[type="checkbox"]');
+          return box && box.checked;
+        });
+        const files = checkedRows.reduce((sum, row) => sum + Number(row.dataset.files), 0);
+        const size = checkedRows.reduce((sum, row) => sum + Number(row.dataset.size), 0);
+        if (!checkedRows.length) {
+          selectionSummary.textContent = '未选择任何文件';
+          transferButton.disabled = true;
+          return;
+        }
+        selectionSummary.innerHTML = `已选 <strong>${checkedRows.length}</strong> 个动作 · <strong>${files}</strong> 个文件 · <strong>${size.toFixed(1)} MB</strong>`;
+        transferButton.disabled = false;
+      }
+
+      function focusRow(row, event) {
+        const visibleRows = blocks
+          .filter(block => !block.hidden)
+          .map(block => block.querySelector('.action-row'));
+        if (event.shiftKey && lastFocusedRow && visibleRows.includes(lastFocusedRow)) {
+          const start = visibleRows.indexOf(lastFocusedRow);
+          const end = visibleRows.indexOf(row);
+          if (!event.ctrlKey) {
+            document.querySelectorAll('.action-row.focused').forEach(item => item.classList.remove('focused'));
+          }
+          visibleRows.slice(Math.min(start, end), Math.max(start, end) + 1)
+            .forEach(item => item.classList.add('focused'));
+        } else if (event.ctrlKey) {
+          row.classList.toggle('focused');
+        } else {
+          document.querySelectorAll('.action-row.focused').forEach(item => item.classList.remove('focused'));
+          row.classList.add('focused');
+        }
+        focusedRow = row;
+        lastFocusedRow = row;
+        document.querySelectorAll('.currentAction').forEach(label => { label.textContent = row.dataset.action; });
+      }
+
+      filterButtons.forEach(button => button.addEventListener('click', () => {
+        filterButtons.forEach(item => item.classList.remove('active'));
+        button.classList.add('active');
+        activeFilter = button.dataset.filter;
+        applyFilter();
+      }));
+
+      search.addEventListener('input', applyFilter);
+
+      blocks.forEach(block => {
+        const row = block.querySelector('.action-row');
+        const box = row.querySelector('input[type="checkbox"]');
+        row.addEventListener('click', event => {
+          if (event.target !== box) focusRow(row, event);
+          if (row.dataset.expandable && event.target.classList.contains('action-name')) {
+            block.querySelector('.frame-detail').classList.toggle('open');
+          }
+        });
+        if (box) box.addEventListener('change', updateSelection);
+      });
+
+      document.getElementById('selectCurrent').addEventListener('click', () => {
+        blocks.forEach(block => {
+          const box = block.querySelector('.action-row input[type="checkbox"]');
+          if (box && !box.disabled) box.checked = block.querySelector('.action-row').classList.contains('focused');
+        });
+        updateSelection();
+      });
+
+      document.getElementById('clearSelection').addEventListener('click', () => {
+        document.querySelectorAll('.action-row input[type="checkbox"]').forEach(box => { box.checked = false; });
+        updateSelection();
+      });
+
+      document.getElementById('playButton').addEventListener('click', event => {
+        event.currentTarget.textContent = event.currentTarget.textContent === 'Ⅱ' ? '▶' : 'Ⅱ';
+      });
+
+      applyFilter();
+      updateSelection();
+    })();
+  </script>
+</body>
+</html>
