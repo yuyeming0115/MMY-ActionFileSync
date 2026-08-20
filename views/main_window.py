@@ -150,7 +150,7 @@ class MainWindow(QMainWindow):
             QPushButton[segment="true"]:checked { background: rgba(212,175,55,0.15); color: #D4AF37; border-color: #D4AF37; }
             QPushButton[actionButton="true"] { background: #2A2E33; border: 1px solid #3A3F46; border-radius: 6px; padding: 4px 12px; }
             QPushButton[actionButton="true"]:hover { border-color: #D4AF37; }
-            QPushButton[actionButton="true"]:checked { background: rgba(212,175,55,0.22); color: #E8E4D9; border-color: #D4AF37; font-weight: 600; }
+            QPushButton[actionButton="true"]:checked { background: rgba(212,175,55,0.22); color: #D4AF37; border-color: #D4AF37; font-weight: 600; }
             QLineEdit {
                 background: #2A2E33; border: 1px solid #3A3F46; border-radius: 6px; padding: 5px 8px;
                 color: #E8E4D9; min-height: 28px;
@@ -158,6 +158,10 @@ class MainWindow(QMainWindow):
             QTreeView {
                 background: #23262a; alternate-background-color: #1E2023; border: 1px solid #3A3F46;
                 selection-background-color: rgba(212,175,55,0.15); selection-color: #D4AF37;
+            }
+            QTreeView::indicator { background: #1E2023; border: 1px solid #5A6068; border-radius: 2px; }
+            QTreeView::indicator:checked, QTreeView::indicator:indeterminate {
+                background: #D4AF37; border: 1px solid #D4AF37; border-radius: 2px;
             }
             QHeaderView::section {
                 background: #2A2E33; border: 0; border-right: 1px solid #3A3F46;

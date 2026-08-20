@@ -39,7 +39,7 @@ STATUS_LABELS = {
 STATUS_FOREGROUND = {
     "only_left": QColor("#4caf50"),
     "different": QColor("#e0a040"),
-    "same": QColor("#7a8290"),
+    "same": QColor("#4caf50"),
     "only_right": QColor("#b985d9"),
     "unknown": QColor("#96A1AD"),
 }
@@ -392,6 +392,9 @@ class ActionDiffPanel(QWidget):
         change_item = QStandardItem(action.change_summary)
         size_item = QStandardItem(self._format_size(action.transfer_size_bytes))
         size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        if action.status == "same":
+            for it in (direction_item, group_item, action_item, status_item, change_item, size_item):
+                it.setForeground(status_color)
         return [selection_item, direction_item, group_item, action_item, status_item, change_item, size_item]
 
     def _build_file_row(self, item: FileDiffItem) -> list[QStandardItem]:
@@ -416,6 +419,9 @@ class ActionDiffPanel(QWidget):
         change_item = QStandardItem()
         size_item = QStandardItem(self._format_size(item.size_bytes))
         size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        if item.status == "same":
+            for it in (direction_item, group_item, file_item, status_item, change_item, size_item):
+                it.setForeground(status_color)
         return [selection_item, direction_item, group_item, file_item, status_item, change_item, size_item]
 
     def _on_expanded(self, proxy_index) -> None:
