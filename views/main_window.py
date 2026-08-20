@@ -148,6 +148,9 @@ class MainWindow(QMainWindow):
             QPushButton[primaryAction="true"]:hover { background: #12578e; }
             QPushButton[segment="true"] { background: transparent; border-color: transparent; padding: 3px 8px; }
             QPushButton[segment="true"]:checked { background: rgba(212,175,55,0.15); color: #D4AF37; border-color: #D4AF37; }
+            QPushButton[actionButton="true"] { background: #2A2E33; border: 1px solid #3A3F46; border-radius: 6px; padding: 4px 12px; }
+            QPushButton[actionButton="true"]:hover { border-color: #D4AF37; }
+            QPushButton[actionButton="true"]:checked { background: #D4AF37; color: #1E2023; border-color: #D4AF37; font-weight: 600; }
             QLineEdit {
                 background: #2A2E33; border: 1px solid #3A3F46; border-radius: 6px; padding: 5px 8px;
                 color: #E8E4D9; min-height: 28px;
