@@ -63,21 +63,25 @@
 python -m pip install -r requirements.txt
 ```
 
-启动应用：
+启动应用（使用项目虚拟环境）：
 
 ```powershell
-python main.py
+.venv\Scripts\python.exe -m main
 ```
 
 ## 测试
 
-不依赖 Qt 的模型与传输测试：
+自动化单元测试（含不依赖 Qt 的模型/传输测试与 Qt 界面冒烟测试）：
 
 ```powershell
-python -m unittest discover -s tests -v
+.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-完整界面冒烟测试需要先安装 `requirements.txt` 中的依赖。
+启动应用做人工 UI 验证：
+
+```powershell
+.venv\Scripts\python.exe -m main
+```
 
 ## 项目结构
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QHBoxLayout,
@@ -336,7 +336,7 @@ class PreviewPanel(QWidget):
         controls = QHBoxLayout()
         controls.setSpacing(8)
         self.play_button = QToolButton()
-        self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+        self.play_button.setIcon(self._tinted_icon(QStyle.SP_MediaPause))
         self.play_button.setToolTip("播放/暂停")
         self.play_button.setAccessibleName("播放或暂停")
         self.frame_label = QLabel("0 / 0")
@@ -398,13 +398,28 @@ class PreviewPanel(QWidget):
             return
         self.frame_slider.setValue((self.frame_slider.value() + 1) % (maximum + 1))
 
+    def _tinted_icon(self, standard_pixmap: QStyle.StandardPixmap) -> QIcon:
+        """把 QStyle 标准图标着色为前景色，避免黑色图标在暗色主题下不可见。"""
+        icon = self.style().standardIcon(standard_pixmap)
+        size = icon.actualSize(QSize(16, 16))
+        source = icon.pixmap(size)
+        tinted = QPixmap(source.size())
+        tinted.fill(Qt.transparent)
+        painter = QPainter(tinted)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.drawPixmap(0, 0, source)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(tinted.rect(), QColor("#E8E4D9"))
+        painter.end()
+        return QIcon(tinted)
+
     def _toggle_playback(self) -> None:
         if self._play_timer.isActive():
             self._play_timer.stop()
-            self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+            self.play_button.setIcon(self._tinted_icon(QStyle.SP_MediaPlay))
         else:
             self._play_timer.start()
-            self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+            self.play_button.setIcon(self._tinted_icon(QStyle.SP_MediaPause))
 
     def _render_progress(self) -> None:
         maximum = self.frame_slider.maximum()

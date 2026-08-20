@@ -116,7 +116,7 @@ class UiWorkflowTests(unittest.TestCase):
                 colors.append(iterator.fragment().charFormat().foreground().color().name())
             block = block.next()
 
-        self.assertEqual(colors, ["#237a45", "#b42318"])
+        self.assertEqual(colors, ["#4caf50", "#ff6b5e"])
         self._dispose(panel)
 
     def test_file_rows_are_created_when_action_expands(self) -> None:
