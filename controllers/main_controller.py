@@ -38,6 +38,7 @@ class MainController(MainWindow):
         self.action_diff_panel.selection_changed.connect(self.on_selection_changed)
         self.transfer_panel.transfer_requested.connect(self.show_transfer_preview)
         self.transfer_panel.clear_selection_requested.connect(self.action_diff_panel.clear_selection)
+        self.preview_panel.path_dropped.connect(self._on_preview_path_dropped)
 
         self._restore_recent_paths()
 
@@ -55,8 +56,37 @@ class MainController(MainWindow):
         self.settings.setValue("paths/target", target_path)
         self.settings.sync()
         self.source_target_bar.refresh_button.setEnabled(bool(source_path and target_path))
+        self._append_recent("source", source_path)
+        self._append_recent("target", target_path)
+        self._refresh_recent_menus()
         if source_path and target_path:
             self.refresh_compare()
+
+    def _on_preview_path_dropped(self, role: str, path: str) -> None:
+        """预览画布拖入目录：按 role 更新对应来源/目标目录并触发对比。"""
+        source = path if role == "source" else (self.state.left_root_path or "")
+        target = path if role == "target" else (self.state.right_root_path or "")
+        self.source_target_bar.set_paths(source, target)
+        self.on_paths_changed(source, target)
+
+    def _append_recent(self, role: str, path: str) -> None:
+        """把目录追加到对应角色的最近列表（去重、最多保留 10 条、最新在前）。"""
+        if not path:
+            return
+        key = f"paths/recent_{role}"
+        recent = self.settings.value(key, []) or []
+        if isinstance(recent, str):
+            recent = [recent]
+        recent = [p for p in recent if p != path]
+        recent.insert(0, path)
+        self.settings.setValue(key, recent[:10])
+
+    def _refresh_recent_menus(self) -> None:
+        """从持久化读取最近目录列表并刷新来源/目标下拉菜单。"""
+        self.source_target_bar.set_recent_paths(
+            self.settings.value("paths/recent_source", []) or [],
+            self.settings.value("paths/recent_target", []) or [],
+        )
 
     def refresh_compare(self) -> None:
         if not self.state.left_root_path or not self.state.right_root_path:
@@ -263,6 +293,7 @@ class MainController(MainWindow):
         self.state.right_root_path = target
         self.source_target_bar.set_paths(source, target)
         self.source_target_bar.refresh_button.setEnabled(bool(source and target))
+        self._refresh_recent_menus()
         if source and target:
             self.source_target_bar.set_scan_status("已恢复上次目录，点击“刷新对比”开始扫描", "idle")
 

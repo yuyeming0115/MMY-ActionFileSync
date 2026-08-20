@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QStyle,
     QToolButton,
@@ -62,14 +63,32 @@ class PathRoleField(QFrame):
         self.button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         self.button.setToolTip("选择目录")
         self.button.setAccessibleName("选择目录")
+        self.recent_button = QToolButton()
+        self.recent_button.setText("▼")
+        self.recent_button.setToolTip("最近目录")
+        self.recent_button.setAccessibleName("最近目录")
         path_row.addWidget(self.edit, 1)
         path_row.addWidget(self.button)
+        path_row.addWidget(self.recent_button)
 
         layout.addLayout(heading)
         layout.addLayout(path_row)
 
+        self._recent_paths: list[str] = []
         self.edit.path_dropped.connect(self._set_path)
         self.button.clicked.connect(self._choose_path)
+        self.recent_button.clicked.connect(self._show_recent_menu)
+
+    def set_recent_paths(self, paths) -> None:
+        self._recent_paths = list(paths or [])
+
+    def _show_recent_menu(self) -> None:
+        if not self._recent_paths:
+            return
+        menu = QMenu(self.recent_button)
+        for path in self._recent_paths:
+            menu.addAction(path, lambda checked=False, p=path: self._set_path(p))
+        menu.exec(self.recent_button.mapToGlobal(self.recent_button.rect().bottomLeft()))
 
     def path(self) -> str:
         return self.edit.text()
@@ -145,6 +164,10 @@ class SourceTargetBar(QWidget):
     def set_paths(self, source: str, target: str) -> None:
         self.source_field.set_path(source)
         self.target_field.set_path(target)
+
+    def set_recent_paths(self, source_list, target_list) -> None:
+        self.source_field.set_recent_paths(source_list)
+        self.target_field.set_recent_paths(target_list)
 
     def paths(self) -> tuple[str, str]:
         return self.source_field.path(), self.target_field.path()

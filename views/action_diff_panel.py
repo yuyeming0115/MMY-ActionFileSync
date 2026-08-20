@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 
 from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QStandardItem, QStandardItemModel
+from PySide6.QtGui import QColor, QKeySequence, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -33,6 +33,16 @@ STATUS_LABELS = {
     "only_right": "目标独有",
     "unknown": "无法判断",
 }
+
+STATUS_FOREGROUND = {
+    "only_left": QColor("#4caf50"),
+    "different": QColor("#e0a040"),
+    "same": QColor("#7a8290"),
+    "only_right": QColor("#b985d9"),
+    "unknown": QColor("#96A1AD"),
+}
+
+ACTION_HIGHLIGHT_STATUSES = ("only_left", "different")
 
 
 class ActionFilterProxyModel(QSortFilterProxyModel):
@@ -144,7 +154,7 @@ class ActionDiffPanel(QWidget):
         self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.view.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.view.setToolTip("可用 Ctrl/Shift 多选动作行，按空格批量切换传输勾选")
+        self.view.setToolTip("单击动作行即选中传输（再点取消）；Ctrl/Shift 多选后按空格批量勾选")
         self.view.setIndentation(16)
         self.view.setExpandsOnDoubleClick(False)
         header = self.view.header()
@@ -171,6 +181,7 @@ class ActionDiffPanel(QWidget):
         self.model.itemChanged.connect(self._on_item_changed)
         self.view.expanded.connect(self._on_expanded)
         self.view.selectionModel().currentChanged.connect(self._on_current_changed)
+        self.view.clicked.connect(self._on_clicked)
         self.toggle_selection_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self.view)
         self.toggle_selection_shortcut.setContext(Qt.WidgetShortcut)
         self.toggle_selection_shortcut.activated.connect(self.toggle_highlighted)
@@ -300,8 +311,12 @@ class ActionDiffPanel(QWidget):
         group_item.setToolTip(action.relative_path)
         action_item = QStandardItem(action_text)
         action_item.setToolTip(action.relative_path)
+        status_color = STATUS_FOREGROUND.get(action.status, QColor("#96A1AD"))
+        if action.status in ACTION_HIGHLIGHT_STATUSES:
+            action_item.setForeground(status_color)
         status_item = QStandardItem(STATUS_LABELS.get(action.status, action.status))
         status_item.setData(action, ROLE_OBJECT)
+        status_item.setForeground(status_color)
         change_item = QStandardItem(action.change_summary)
         size_item = QStandardItem(self._format_size(action.transfer_size_bytes))
         size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -321,7 +336,11 @@ class ActionDiffPanel(QWidget):
         group_item = QStandardItem()
         file_item = QStandardItem(item.name)
         file_item.setToolTip(item.relative_path)
+        status_color = STATUS_FOREGROUND.get(item.status, QColor("#96A1AD"))
+        if item.status in ACTION_HIGHLIGHT_STATUSES:
+            file_item.setForeground(status_color)
         status_item = QStandardItem(STATUS_LABELS.get(item.status, item.status))
+        status_item.setForeground(status_color)
         change_item = QStandardItem()
         size_item = QStandardItem(self._format_size(item.size_bytes))
         size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -429,6 +448,17 @@ class ActionDiffPanel(QWidget):
 
     def _on_current_changed(self, current, _previous) -> None:
         self._emit_action(current)
+
+    def _on_clicked(self, proxy_index) -> None:
+        """单击动作行切换其传输勾选；列0 的 checkbox 由 Qt 内置处理，避免重复 toggle。"""
+        if not proxy_index.isValid() or proxy_index.column() == 0:
+            return
+        source_index = self.proxy.mapToSource(proxy_index.siblingAtColumn(0))
+        item = self.model.itemFromIndex(source_index)
+        obj = item.data(ROLE_OBJECT)
+        if isinstance(obj, ActionDiffItem) and item.isCheckable():
+            new_state = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+            item.setCheckState(new_state)
 
     def _emit_action(self, proxy_index) -> None:
         if not proxy_index.isValid():

@@ -28,10 +28,26 @@ STATUS_EMPTY_TEXT = {
 
 class PreviewCanvas(QLabel):
     resized = Signal()
+    path_dropped = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAcceptDrops(True)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self.resized.emit()
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # type: ignore[override]
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if path:
+                self.path_dropped.emit(path)
 
 
 class ElidedPathLabel(QLabel):
@@ -57,8 +73,11 @@ class ElidedPathLabel(QLabel):
 
 
 class SinglePreviewWidget(QWidget):
+    path_dropped = Signal(str, str)
+
     def __init__(self, title: str, role: str) -> None:
         super().__init__()
+        self._role = role
         self._static_pixmap = QPixmap()
         self._frame_pixmaps: list[QPixmap] = []
         self._zoom_percent = 100
@@ -90,6 +109,7 @@ class SinglePreviewWidget(QWidget):
         self.canvas.setWordWrap(True)
         self.canvas.setProperty("previewCanvas", True)
         self.canvas.resized.connect(self._render_current_frame)
+        self.canvas.path_dropped.connect(lambda p: self.path_dropped.emit(self._role, p))
 
         self.meta_label = QLabel("尺寸: - · 帧: -")
         self.meta_label.setProperty("secondaryText", True)
@@ -287,6 +307,8 @@ class BlinkPreviewWidget(QWidget):
 
 
 class PreviewPanel(QWidget):
+    path_dropped = Signal(str, str)
+
     def __init__(self) -> None:
         super().__init__()
         self._play_timer = QTimer(self)
@@ -321,6 +343,8 @@ class PreviewPanel(QWidget):
 
         self.left_preview = SinglePreviewWidget("来源｜新动作", "source")
         self.right_preview = SinglePreviewWidget("目标｜SVN", "target")
+        self.left_preview.path_dropped.connect(self.path_dropped)
+        self.right_preview.path_dropped.connect(self.path_dropped)
         parallel_page = QWidget()
         parallel_layout = QHBoxLayout(parallel_page)
         parallel_layout.setContentsMargins(0, 0, 0, 0)
