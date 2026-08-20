@@ -1,64 +1,77 @@
 @echo off
-chcp 65001 >nul
+setlocal
+
+set "ROOT=%~dp0"
+cd /d "%ROOT%"
+
 echo ========================================
-echo   MMY-ActionFileSync - 打包为单文件 exe
+echo   MMY-ActionFileSync - build onefile exe
 echo ========================================
 echo.
 
-:: 检查 pip
-pip --version >nul 2>&1
-if errorlevel 1 (
-    echo [错误] 未找到 pip，请先安装 Python 和 pip
-    pause
-    exit /b 1
-)
+set "PYTHON=%ROOT%.venv\Scripts\python.exe"
 
-:: 安装/检查 pyinstaller
-echo [1/3] 检查 PyInstaller...
-pip show pyinstaller >nul 2>&1
-if errorlevel 1 (
-    echo PyInstaller 未安装，正在安装...
-    pip install pyinstaller
+if not exist "%PYTHON%" (
+    echo [1/4] Creating local virtual environment...
+    py -3 -m venv "%ROOT%.venv"
     if errorlevel 1 (
-        echo [错误] PyInstaller 安装失败
+        python -m venv "%ROOT%.venv"
+    )
+    if not exist "%PYTHON%" (
+        echo [ERROR] Failed to create .venv. Please install Python 3 and try again.
         pause
         exit /b 1
     )
 ) else (
-    echo PyInstaller 已安装
+    echo [1/4] Using local virtual environment.
 )
 echo.
 
-:: 安装项目依赖
-echo [2/3] 安装项目依赖...
-pip install -r requirements.txt
+echo [2/4] Installing project dependencies...
+"%PYTHON%" -m pip install -r requirements.txt
 if errorlevel 1 (
-    echo [错误] 依赖安装失败
+    echo [ERROR] Failed to install project dependencies.
     pause
     exit /b 1
 )
 echo.
 
-:: 执行打包
-echo [3/3] 开始打包...
-pyinstaller ^
+echo [3/4] Checking PyInstaller...
+"%PYTHON%" -m PyInstaller --version >nul 2>&1
+if errorlevel 1 (
+    echo PyInstaller is not installed. Installing...
+    "%PYTHON%" -m pip install pyinstaller
+    if errorlevel 1 (
+        echo [ERROR] Failed to install PyInstaller.
+        pause
+        exit /b 1
+    )
+) else (
+    echo PyInstaller is already installed.
+)
+echo.
+
+echo [4/4] Building executable...
+"%PYTHON%" -m PyInstaller ^
+    --noconfirm ^
+    --clean ^
     --onefile ^
     --windowed ^
     --name "MMY-ActionFileSync" ^
     --add-data "assets;assets" ^
-    --icon="assets\icon.ico" ^
+    --icon "assets\icon.ico" ^
     main.py
 
 if errorlevel 1 (
     echo.
-    echo [错误] 打包失败
+    echo [ERROR] Build failed.
     pause
     exit /b 1
 )
 
 echo.
 echo ========================================
-echo   打包完成！
-echo   输出文件: dist\MMY-ActionFileSync.exe
+echo   Build completed.
+echo   Output: dist\MMY-ActionFileSync.exe
 echo ========================================
 pause

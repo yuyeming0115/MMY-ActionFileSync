@@ -13,27 +13,27 @@ from PySide6.QtWidgets import (
 from models.tree_node import TreeNode
 
 STATUS_COLORS = {
-    "same": QColor("#2e7d32"),
-    "different": QColor("#d84315"),
-    "only_left": QColor("#1565c0"),
-    "only_right": QColor("#6a1b9a"),
-    "unknown": QColor("#616161"),
+    "same": QColor("#4caf50"),
+    "different": QColor("#ff6b5e"),
+    "only_left": QColor("#5b9bd5"),
+    "only_right": QColor("#b985d9"),
+    "unknown": QColor("#96A1AD"),
 }
 
 STATUS_BACKGROUNDS_LEFT = {
-    "same": QColor("#f7f4ef"),
-    "different": QColor("#f7ddd7"),
-    "only_left": QColor("#d9ebff"),
-    "only_right": QColor("#eee7f9"),
-    "unknown": QColor("#f0ece6"),
+    "same": QColor("#1e2a1e"),
+    "different": QColor("#3a2420"),
+    "only_left": QColor("#1f2d3a"),
+    "only_right": QColor("#2a2138"),
+    "unknown": QColor("#23262a"),
 }
 
 STATUS_BACKGROUNDS_RIGHT = {
-    "same": QColor("#f7f4ef"),
-    "different": QColor("#dce7f6"),
-    "only_left": QColor("#e4f0fc"),
-    "only_right": QColor("#f2dbff"),
-    "unknown": QColor("#f0ece6"),
+    "same": QColor("#1e2a1e"),
+    "different": QColor("#1f2a3a"),
+    "only_left": QColor("#1a2735"),
+    "only_right": QColor("#241a30"),
+    "unknown": QColor("#23262a"),
 }
 
 STATUS_LABELS = {

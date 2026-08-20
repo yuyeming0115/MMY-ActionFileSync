@@ -3,15 +3,17 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 
 from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QStandardItem, QStandardItemModel
+from PySide6.QtGui import QColor, QKeySequence, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -33,6 +35,16 @@ STATUS_LABELS = {
     "only_right": "目标独有",
     "unknown": "无法判断",
 }
+
+STATUS_FOREGROUND = {
+    "only_left": QColor("#4caf50"),
+    "different": QColor("#e0a040"),
+    "same": QColor("#4caf50"),
+    "only_right": QColor("#b985d9"),
+    "unknown": QColor("#96A1AD"),
+}
+
+ACTION_HIGHLIGHT_STATUSES = ("only_left", "different")
 
 
 class ActionFilterProxyModel(QSortFilterProxyModel):
@@ -132,6 +144,20 @@ class ActionDiffPanel(QWidget):
         search_row.addWidget(self.select_current_button)
         search_row.addWidget(self.clear_selection_button)
 
+        self.action_buttons_scroll = QScrollArea()
+        self.action_buttons_scroll.setWidgetResizable(True)
+        self.action_buttons_scroll.setFrameShape(QFrame.NoFrame)
+        self.action_buttons_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.action_buttons_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.action_buttons_scroll.setFixedHeight(40)
+        self.action_buttons_scroll.setAccessibleName("动作快捷选择")
+        self.action_buttons_container = QWidget()
+        self.action_buttons_container.setStyleSheet("background:transparent;")
+        self.action_buttons_layout = QHBoxLayout(self.action_buttons_container)
+        self.action_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self.action_buttons_layout.setSpacing(6)
+        self.action_buttons_scroll.setWidget(self.action_buttons_container)
+
         self.model = QStandardItemModel(self)
         self.model.setHorizontalHeaderLabels(["选择", "方向", "目录", "动作", "状态", "变化", "大小"])
         self.proxy = ActionFilterProxyModel()
@@ -144,7 +170,7 @@ class ActionDiffPanel(QWidget):
         self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.view.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.view.setToolTip("可用 Ctrl/Shift 多选动作行，按空格批量切换传输勾选")
+        self.view.setToolTip("单击动作行即选中传输（再点取消）；Ctrl/Shift 多选后按空格批量勾选")
         self.view.setIndentation(16)
         self.view.setExpandsOnDoubleClick(False)
         header = self.view.header()
@@ -161,6 +187,7 @@ class ActionDiffPanel(QWidget):
         layout.addLayout(title_row)
         layout.addLayout(filter_row)
         layout.addLayout(search_row)
+        layout.addWidget(self.action_buttons_scroll)
         layout.addWidget(self.view, 1)
 
         self.filter_group.buttonClicked.connect(self._on_filter_changed)
@@ -171,6 +198,7 @@ class ActionDiffPanel(QWidget):
         self.model.itemChanged.connect(self._on_item_changed)
         self.view.expanded.connect(self._on_expanded)
         self.view.selectionModel().currentChanged.connect(self._on_current_changed)
+        self.view.clicked.connect(self._on_clicked)
         self.toggle_selection_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self.view)
         self.toggle_selection_shortcut.setContext(Qt.WidgetShortcut)
         self.toggle_selection_shortcut.activated.connect(self.toggle_highlighted)
@@ -197,6 +225,7 @@ class ActionDiffPanel(QWidget):
             index = self.proxy.index(0, 0)
             self.view.setCurrentIndex(index)
             self._emit_action(index)
+        self._rebuild_action_buttons()
         self._emit_selection()
 
     def reset(self) -> None:
@@ -205,6 +234,7 @@ class ActionDiffPanel(QWidget):
         self.model.removeRows(0, self.model.rowCount())
         self.search_edit.clear()
         self.visible_label.setText("尚未扫描")
+        self._rebuild_action_buttons()
         self._emit_selection()
 
     def set_selected_paths(self, paths: set[str]) -> None:
@@ -215,7 +245,60 @@ class ActionDiffPanel(QWidget):
         }
         self.selected_paths = set(paths) & eligible
         self._sync_all_checks()
+        self._sync_action_buttons()
         self._emit_selection()
+
+    def _action_button_paths(self, name: str) -> set[str]:
+        """收集所有同名动作的可传输文件相对路径。"""
+        paths: set[str] = set()
+        for action in self.actions:
+            if action.action_name == name:
+                paths.update(item.relative_path for item in action.transferable_files)
+        return paths
+
+    def _rebuild_action_buttons(self) -> None:
+        """根据当前动作清单重建顶部动作快捷按钮（按首次出现顺序去重）。"""
+        layout = self.action_buttons_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        seen: list[str] = []
+        for action in self.actions:
+            name = action.action_name
+            if name and name not in seen:
+                seen.append(name)
+        for name in seen:
+            button = QPushButton(name)
+            button.setCheckable(True)
+            button.setProperty("actionButton", True)
+            button.setToolTip(f"勾选所有方向下的 {name} 动作")
+            button.clicked.connect(
+                lambda checked=False, n=name: self._on_action_button_toggled(n, checked)
+            )
+            layout.addWidget(button)
+        self._sync_action_buttons()
+
+    def _sync_action_buttons(self) -> None:
+        """根据当前选中状态刷新各动作按钮的 checked 态。"""
+        for index in range(self.action_buttons_layout.count()):
+            button = self.action_buttons_layout.itemAt(index).widget()
+            if not isinstance(button, QPushButton):
+                continue
+            paths = self._action_button_paths(button.text())
+            button.setChecked(bool(paths) and paths.issubset(self.selected_paths))
+
+    def _on_action_button_toggled(self, name: str, checked: bool) -> None:
+        """点击动作按钮：勾选/取消该动作在所有方向下的可传输文件。"""
+        paths = self._action_button_paths(name)
+        if not paths:
+            return
+        if checked:
+            self.set_selected_paths(self.selected_paths | paths)
+        else:
+            self.set_selected_paths(self.selected_paths - paths)
 
     def set_controls_enabled(self, enabled: bool) -> None:
         self.view.setEnabled(enabled)
@@ -300,11 +383,18 @@ class ActionDiffPanel(QWidget):
         group_item.setToolTip(action.relative_path)
         action_item = QStandardItem(action_text)
         action_item.setToolTip(action.relative_path)
+        status_color = STATUS_FOREGROUND.get(action.status, QColor("#96A1AD"))
+        if action.status in ACTION_HIGHLIGHT_STATUSES:
+            action_item.setForeground(status_color)
         status_item = QStandardItem(STATUS_LABELS.get(action.status, action.status))
         status_item.setData(action, ROLE_OBJECT)
+        status_item.setForeground(status_color)
         change_item = QStandardItem(action.change_summary)
         size_item = QStandardItem(self._format_size(action.transfer_size_bytes))
         size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        if action.status == "same":
+            for it in (direction_item, group_item, action_item, status_item, change_item, size_item):
+                it.setForeground(status_color)
         return [selection_item, direction_item, group_item, action_item, status_item, change_item, size_item]
 
     def _build_file_row(self, item: FileDiffItem) -> list[QStandardItem]:
@@ -321,10 +411,17 @@ class ActionDiffPanel(QWidget):
         group_item = QStandardItem()
         file_item = QStandardItem(item.name)
         file_item.setToolTip(item.relative_path)
+        status_color = STATUS_FOREGROUND.get(item.status, QColor("#96A1AD"))
+        if item.status in ACTION_HIGHLIGHT_STATUSES:
+            file_item.setForeground(status_color)
         status_item = QStandardItem(STATUS_LABELS.get(item.status, item.status))
+        status_item.setForeground(status_color)
         change_item = QStandardItem()
         size_item = QStandardItem(self._format_size(item.size_bytes))
         size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        if item.status == "same":
+            for it in (direction_item, group_item, file_item, status_item, change_item, size_item):
+                it.setForeground(status_color)
         return [selection_item, direction_item, group_item, file_item, status_item, change_item, size_item]
 
     def _on_expanded(self, proxy_index) -> None:
@@ -429,6 +526,17 @@ class ActionDiffPanel(QWidget):
 
     def _on_current_changed(self, current, _previous) -> None:
         self._emit_action(current)
+
+    def _on_clicked(self, proxy_index) -> None:
+        """单击动作行切换其传输勾选；列0 的 checkbox 由 Qt 内置处理，避免重复 toggle。"""
+        if not proxy_index.isValid() or proxy_index.column() == 0:
+            return
+        source_index = self.proxy.mapToSource(proxy_index.siblingAtColumn(0))
+        item = self.model.itemFromIndex(source_index)
+        obj = item.data(ROLE_OBJECT)
+        if isinstance(obj, ActionDiffItem) and item.isCheckable():
+            new_state = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+            item.setCheckState(new_state)
 
     def _emit_action(self, proxy_index) -> None:
         if not proxy_index.isValid():

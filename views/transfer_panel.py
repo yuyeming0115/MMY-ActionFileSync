@@ -73,11 +73,11 @@ class TransferPanel(QWidget):
         timestamp = QTime.currentTime().toString("HH:mm:ss")
         resolved_level = level or self._infer_log_level(message)
         colors = {
-            "info": "#1769aa",
-            "success": "#237a45",
-            "warning": "#9a6700",
-            "error": "#b42318",
-            "neutral": "#344254",
+            "info": "#5b9bd5",
+            "success": "#4caf50",
+            "warning": "#e0a040",
+            "error": "#ff6b5e",
+            "neutral": "#96A1AD",
         }
         cursor = self.log.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)

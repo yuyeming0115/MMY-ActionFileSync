@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QHBoxLayout,
@@ -28,10 +28,26 @@ STATUS_EMPTY_TEXT = {
 
 class PreviewCanvas(QLabel):
     resized = Signal()
+    path_dropped = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAcceptDrops(True)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self.resized.emit()
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # type: ignore[override]
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if path:
+                self.path_dropped.emit(path)
 
 
 class ElidedPathLabel(QLabel):
@@ -57,8 +73,11 @@ class ElidedPathLabel(QLabel):
 
 
 class SinglePreviewWidget(QWidget):
+    path_dropped = Signal(str, str)
+
     def __init__(self, title: str, role: str) -> None:
         super().__init__()
+        self._role = role
         self._static_pixmap = QPixmap()
         self._frame_pixmaps: list[QPixmap] = []
         self._zoom_percent = 100
@@ -90,6 +109,7 @@ class SinglePreviewWidget(QWidget):
         self.canvas.setWordWrap(True)
         self.canvas.setProperty("previewCanvas", True)
         self.canvas.resized.connect(self._render_current_frame)
+        self.canvas.path_dropped.connect(lambda p: self.path_dropped.emit(self._role, p))
 
         self.meta_label = QLabel("尺寸: - · 帧: -")
         self.meta_label.setProperty("secondaryText", True)
@@ -287,6 +307,8 @@ class BlinkPreviewWidget(QWidget):
 
 
 class PreviewPanel(QWidget):
+    path_dropped = Signal(str, str)
+
     def __init__(self) -> None:
         super().__init__()
         self._play_timer = QTimer(self)
@@ -321,6 +343,8 @@ class PreviewPanel(QWidget):
 
         self.left_preview = SinglePreviewWidget("来源｜新动作", "source")
         self.right_preview = SinglePreviewWidget("目标｜SVN", "target")
+        self.left_preview.path_dropped.connect(self.path_dropped)
+        self.right_preview.path_dropped.connect(self.path_dropped)
         parallel_page = QWidget()
         parallel_layout = QHBoxLayout(parallel_page)
         parallel_layout.setContentsMargins(0, 0, 0, 0)
@@ -336,7 +360,7 @@ class PreviewPanel(QWidget):
         controls = QHBoxLayout()
         controls.setSpacing(8)
         self.play_button = QToolButton()
-        self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+        self.play_button.setIcon(self._tinted_icon(QStyle.SP_MediaPause))
         self.play_button.setToolTip("播放/暂停")
         self.play_button.setAccessibleName("播放或暂停")
         self.frame_label = QLabel("0 / 0")
@@ -398,13 +422,28 @@ class PreviewPanel(QWidget):
             return
         self.frame_slider.setValue((self.frame_slider.value() + 1) % (maximum + 1))
 
+    def _tinted_icon(self, standard_pixmap: QStyle.StandardPixmap) -> QIcon:
+        """把 QStyle 标准图标着色为前景色，避免黑色图标在暗色主题下不可见。"""
+        icon = self.style().standardIcon(standard_pixmap)
+        size = icon.actualSize(QSize(16, 16))
+        source = icon.pixmap(size)
+        tinted = QPixmap(source.size())
+        tinted.fill(Qt.transparent)
+        painter = QPainter(tinted)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.drawPixmap(0, 0, source)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(tinted.rect(), QColor("#E8E4D9"))
+        painter.end()
+        return QIcon(tinted)
+
     def _toggle_playback(self) -> None:
         if self._play_timer.isActive():
             self._play_timer.stop()
-            self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+            self.play_button.setIcon(self._tinted_icon(QStyle.SP_MediaPlay))
         else:
             self._play_timer.start()
-            self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+            self.play_button.setIcon(self._tinted_icon(QStyle.SP_MediaPause))
 
     def _render_progress(self) -> None:
         maximum = self.frame_slider.maximum()

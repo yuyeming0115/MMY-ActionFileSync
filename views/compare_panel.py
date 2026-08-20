@@ -224,15 +224,15 @@ class ComparePanel(QWidget):
         label = STATUS_LABELS.get(node.compare_status, node.compare_status)
         status_item = QStandardItem(label)
 
-        bg = "#f0ece6"  # default
+        bg = "#23262a"  # default
         if node.compare_status == "same":
-            bg = "#f7f4ef"
+            bg = "#1e2a1e"
         elif node.compare_status == "different":
-            bg = "#f7ddd7" if side == "left" else "#dce7f6"
+            bg = "#3a2420" if side == "left" else "#1f2a3a"
         elif node.compare_status == "only_left":
-            bg = "#d9ebff" if side == "left" else "#e4f0fc"
+            bg = "#1f2d3a" if side == "left" else "#1a2735"
         elif node.compare_status == "only_right":
-            bg = "#eee7f9" if side == "left" else "#f2dbff"
+            bg = "#2a2138" if side == "left" else "#241a30"
 
         for ci in [item, size_item, status_item]:
             ci.setBackground(bg)
