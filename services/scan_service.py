@@ -68,7 +68,8 @@ class ScanService:
 
     def _collect_image_files(self, directory: Path) -> list[Path]:
         files = [path for path in directory.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS]
-        if len(files) < 2:
+        # 单帧动作（hurt/block/dead）是本项目美术输出的正常形态，1 张图也算序列
+        if not files:
             return []
         return natsorted(files, key=lambda path: path.name)
 
