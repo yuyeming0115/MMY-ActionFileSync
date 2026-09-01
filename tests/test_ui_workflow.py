@@ -16,7 +16,7 @@ HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, QTimer, Qt
-    from PySide6.QtWidgets import QAbstractButton, QApplication
+    from PySide6.QtWidgets import QAbstractButton, QApplication, QHeaderView
     from PIL import Image
 
     from controllers.main_controller import MainController
@@ -49,7 +49,7 @@ class UiWorkflowTests(unittest.TestCase):
         panel = ActionDiffPanel()
         panel.populate([action])
 
-        panel.select_only_current()
+        panel.select_changed()
         selected_before = set(panel.selected_paths)
         panel.search_edit.setText("missing")
         panel.search_edit.setText("idle")
@@ -96,11 +96,49 @@ class UiWorkflowTests(unittest.TestCase):
             QItemSelectionModel.Select | QItemSelectionModel.Rows,
         )
 
-        panel.select_only_current()
+        panel.toggle_highlighted()
 
         self.assertEqual(
             panel.selected_paths,
             {"player/attack/attack_001.png", "player/idle/idle_001.png"},
+        )
+        self._dispose(panel)
+
+    def test_select_changed_checks_only_changed_actions(self) -> None:
+        def make_action(name: str, file_status: str) -> ActionDiffItem:
+            return ActionDiffItem(
+                action_id=f"NW/{name}",
+                action_name=name,
+                relative_path=f"NW/{name}",
+                status=file_status,
+                source_node=None,
+                target_node=None,
+                file_diffs=[
+                    FileDiffItem(
+                        f"NW/{name}/{name}_001.png",
+                        f"{name}_001.png",
+                        file_status,
+                        "source" if file_status != "same" else None,
+                        "target" if file_status != "only_left" else None,
+                        100,
+                    )
+                ],
+            )
+
+        actions = [
+            make_action("idle", "different"),
+            make_action("run", "only_left"),
+            make_action("walk", "same"),
+        ]
+        panel = ActionDiffPanel()
+        panel.populate(actions)
+        panel.set_selected_paths({"NW/idle/idle_001.png"})
+
+        panel.select_changed()
+
+        self.assertEqual(
+            panel.selected_paths,
+            {"NW/idle/idle_001.png", "NW/run/run_001.png"},
         )
         self._dispose(panel)
 
@@ -133,6 +171,82 @@ class UiWorkflowTests(unittest.TestCase):
         self.assertEqual(source_parent.child(0, 1).text(), "→")
         self.assertEqual(source_parent.child(0, 3).text(), "idle_001.png")
         self._dispose(panel)
+
+    def test_direction_buttons_toggle_all_actions_in_direction(self) -> None:
+        actions = [
+            ActionDiffItem(
+                action_id=f"{direction}-{name}",
+                action_name=name,
+                relative_path=f"{direction}/{name}",
+                status="different",
+                source_node=None,
+                target_node=None,
+                file_diffs=[
+                    FileDiffItem(
+                        f"{direction}/{name}/{name}_001.png",
+                        f"{name}_001.png",
+                        "different",
+                        "source",
+                        "target",
+                        100,
+                    )
+                ],
+            )
+            for direction, name in [("NW", "idle"), ("SE", "idle"), ("E", "run")]
+        ]
+        panel = ActionDiffPanel()
+        panel.populate(actions)
+
+        layout = panel.direction_buttons_layout
+        buttons = [layout.itemAt(index).widget() for index in range(layout.count())]
+        self.assertEqual([button.text() for button in buttons], ["E", "NW", "SE"])
+        self.assertFalse(panel.direction_buttons_scroll.isHidden())
+
+        nw_button = buttons[1]
+        nw_button.click()
+        self.assertEqual(panel.selected_paths, {"NW/idle/idle_001.png"})
+        self.assertTrue(nw_button.isChecked())
+
+        nw_button.click()
+        self.assertEqual(panel.selected_paths, set())
+        self.assertFalse(nw_button.isChecked())
+        self._dispose(panel)
+
+    def test_direction_row_hidden_for_flat_action_structure(self) -> None:
+        files = [FileDiffItem("idle/idle_001.png", "idle_001.png", "different", "source", "target", 100)]
+        action = ActionDiffItem("idle", "idle", "idle", "different", None, None, files)
+        panel = ActionDiffPanel()
+        panel.populate([action])
+
+        self.assertTrue(panel.direction_buttons_scroll.isHidden())
+        self.assertEqual(panel.direction_buttons_layout.count(), 0)
+        self._dispose(panel)
+
+    def test_transfer_preview_columns_are_resizable_and_persist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            target = root / "target"
+            action = source / "NW" / "idle"
+            action.mkdir(parents=True)
+            (action / "idle_001.png").write_bytes(b"frame")
+            paths = ["NW/idle/idle_001.png"]
+            action_map = {paths[0]: "NW/idle"}
+
+            dialog = TransferPreviewDialog(str(source), str(target), paths, action_map)
+            header = dialog.tree.header()
+            for column in range(4):
+                self.assertEqual(header.sectionResizeMode(column), QHeaderView.Interactive)
+
+            dialog.tree.setColumnWidth(0, 180)
+            dialog.tree.setColumnWidth(1, 700)
+            dialog.done(1)
+
+            reopened = TransferPreviewDialog(str(source), str(target), paths, action_map)
+            self.assertEqual(reopened.tree.columnWidth(0), 180)
+            self.assertEqual(reopened.tree.columnWidth(1), 700)
+            self._dispose(reopened)
+            self._dispose(dialog)
 
     def test_transfer_preview_can_exclude_one_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -362,7 +476,7 @@ class UiWorkflowTests(unittest.TestCase):
             self.assertEqual([item.action_name for item in controller.state.action_items], ["idle"])
             self.assertFalse(controller.state.selected_file_paths)
             controller.action_diff_panel.view.setCurrentIndex(controller.action_diff_panel.proxy.index(0, 0))
-            controller.action_diff_panel.select_only_current()
+            controller.action_diff_panel.select_changed()
             selected = set(controller.state.selected_file_paths)
             self.assertEqual(selected, {"player/idle/idle_002.png"})
 

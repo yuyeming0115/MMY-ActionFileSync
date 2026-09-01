@@ -151,6 +151,9 @@ class MainWindow(QMainWindow):
             QPushButton[actionButton="true"] { background: #2A2E33; border: 1px solid #3A3F46; border-radius: 6px; padding: 4px 12px; }
             QPushButton[actionButton="true"]:hover { border-color: #D4AF37; }
             QPushButton[actionButton="true"]:checked { background: rgba(212,175,55,0.22); color: #D4AF37; border-color: #D4AF37; font-weight: 600; }
+            QPushButton[directionButton="true"] { background: #2A2E33; border: 1px solid #3A3F46; border-radius: 6px; padding: 4px 12px; }
+            QPushButton[directionButton="true"]:hover { border-color: #5b9bd5; }
+            QPushButton[directionButton="true"]:checked { background: rgba(91,155,213,0.22); color: #5b9bd5; border-color: #5b9bd5; font-weight: 600; }
             QLineEdit {
                 background: #2A2E33; border: 1px solid #3A3F46; border-radius: 6px; padding: 5px 8px;
                 color: #E8E4D9; min-height: 28px;

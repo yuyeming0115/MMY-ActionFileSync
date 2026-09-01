@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -14,6 +14,10 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
 )
+
+
+COLUMN_COUNT = 4
+DEFAULT_COLUMN_WIDTHS = [240, 560, 90, 90]
 
 
 class TransferPreviewDialog(QDialog):
@@ -46,10 +50,10 @@ class TransferPreviewDialog(QDialog):
         self.tree.setIndentation(18)
         header = self.tree.header()
         header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        for column in range(COLUMN_COUNT):
+            header.setSectionResizeMode(column, QHeaderView.Interactive)
+        for column, width in enumerate(self._load_column_widths()):
+            self.tree.setColumnWidth(column, width)
         layout.addWidget(self.tree, 1)
 
         button_row = QHBoxLayout()
@@ -72,6 +76,26 @@ class TransferPreviewDialog(QDialog):
         self.confirm_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
         self._update_summary()
+
+    def done(self, result: int) -> None:  # type: ignore[override]
+        self._save_column_widths()
+        super().done(result)
+
+    def _load_column_widths(self) -> list[int]:
+        saved = QSettings("MMY-Tools", "MMY-ActionFileSync").value("transferPreview/columnWidths") or []
+        if isinstance(saved, str):
+            saved = [saved]
+        try:
+            widths = [int(value) for value in saved]
+        except (TypeError, ValueError):
+            widths = []
+        if len(widths) == COLUMN_COUNT and all(width > 0 for width in widths):
+            return widths
+        return list(DEFAULT_COLUMN_WIDTHS)
+
+    def _save_column_widths(self) -> None:
+        widths = [self.tree.columnWidth(column) for column in range(COLUMN_COUNT)]
+        QSettings("MMY-Tools", "MMY-ActionFileSync").setValue("transferPreview/columnWidths", widths)
 
     def selected_paths(self) -> list[str]:
         paths: list[str] = []
@@ -97,7 +121,9 @@ class TransferPreviewDialog(QDialog):
             for action_path, paths in sorted(groups.items()):
                 parent = QTreeWidgetItem(self.tree)
                 parent.setText(0, Path(action_path).name or action_path)
-                parent.setText(1, (self.right_root / Path(action_path)).as_posix())
+                target_dir = (self.right_root / Path(action_path)).as_posix()
+                parent.setText(1, target_dir)
+                parent.setToolTip(1, target_dir)
                 parent.setText(2, f"{len(paths)} 个文件")
                 parent.setFlags(parent.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
                 parent.setCheckState(0, Qt.Checked)
@@ -108,6 +134,7 @@ class TransferPreviewDialog(QDialog):
                     child = QTreeWidgetItem(parent)
                     child.setText(0, Path(relative_path).name)
                     child.setText(1, target.as_posix())
+                    child.setToolTip(1, target.as_posix())
                     child.setText(2, "覆盖" if target.exists() else "新增")
                     child.setText(3, self._format_size(source.stat().st_size))
                     child.setData(0, Qt.UserRole, relative_path)

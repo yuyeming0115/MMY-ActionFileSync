@@ -137,26 +137,17 @@ class ActionDiffPanel(QWidget):
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("搜索动作或相对路径")
         self.select_visible_button = QPushButton("全选当前结果")
-        self.select_current_button = QPushButton("仅勾选高亮动作")
+        self.select_changed_button = QPushButton("仅勾选有变更")
+        self.select_changed_button.setToolTip("只勾选所有有变更动作的文件，替换当前选择")
         self.clear_selection_button = QPushButton("清空选择")
         search_row.addWidget(self.search_edit, 1)
         search_row.addWidget(self.select_visible_button)
-        search_row.addWidget(self.select_current_button)
+        search_row.addWidget(self.select_changed_button)
         search_row.addWidget(self.clear_selection_button)
 
-        self.action_buttons_scroll = QScrollArea()
-        self.action_buttons_scroll.setWidgetResizable(True)
-        self.action_buttons_scroll.setFrameShape(QFrame.NoFrame)
-        self.action_buttons_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.action_buttons_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.action_buttons_scroll.setFixedHeight(40)
-        self.action_buttons_scroll.setAccessibleName("动作快捷选择")
-        self.action_buttons_container = QWidget()
-        self.action_buttons_container.setStyleSheet("background:transparent;")
-        self.action_buttons_layout = QHBoxLayout(self.action_buttons_container)
-        self.action_buttons_layout.setContentsMargins(0, 0, 0, 0)
-        self.action_buttons_layout.setSpacing(6)
-        self.action_buttons_scroll.setWidget(self.action_buttons_container)
+        self.direction_buttons_scroll, self.direction_buttons_layout = self._make_button_row("方向快捷选择")
+        self.direction_buttons_scroll.hide()
+        self.action_buttons_scroll, self.action_buttons_layout = self._make_button_row("动作快捷选择")
 
         self.model = QStandardItemModel(self)
         self.model.setHorizontalHeaderLabels(["选择", "方向", "目录", "动作", "状态", "变化", "大小"])
@@ -187,13 +178,14 @@ class ActionDiffPanel(QWidget):
         layout.addLayout(title_row)
         layout.addLayout(filter_row)
         layout.addLayout(search_row)
+        layout.addWidget(self.direction_buttons_scroll)
         layout.addWidget(self.action_buttons_scroll)
         layout.addWidget(self.view, 1)
 
         self.filter_group.buttonClicked.connect(self._on_filter_changed)
         self.search_edit.textChanged.connect(self._on_search_changed)
         self.select_visible_button.clicked.connect(self.select_visible)
-        self.select_current_button.clicked.connect(self.select_only_current)
+        self.select_changed_button.clicked.connect(self.select_changed)
         self.clear_selection_button.clicked.connect(self.clear_selection)
         self.model.itemChanged.connect(self._on_item_changed)
         self.view.expanded.connect(self._on_expanded)
@@ -225,6 +217,7 @@ class ActionDiffPanel(QWidget):
             index = self.proxy.index(0, 0)
             self.view.setCurrentIndex(index)
             self._emit_action(index)
+        self._rebuild_direction_buttons()
         self._rebuild_action_buttons()
         self._emit_selection()
 
@@ -234,6 +227,7 @@ class ActionDiffPanel(QWidget):
         self.model.removeRows(0, self.model.rowCount())
         self.search_edit.clear()
         self.visible_label.setText("尚未扫描")
+        self._rebuild_direction_buttons()
         self._rebuild_action_buttons()
         self._emit_selection()
 
@@ -245,8 +239,82 @@ class ActionDiffPanel(QWidget):
         }
         self.selected_paths = set(paths) & eligible
         self._sync_all_checks()
+        self._sync_direction_buttons()
         self._sync_action_buttons()
         self._emit_selection()
+
+    @staticmethod
+    def _make_button_row(accessible_name: str) -> tuple[QScrollArea, QHBoxLayout]:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFixedHeight(40)
+        scroll.setAccessibleName(accessible_name)
+        container = QWidget()
+        container.setStyleSheet("background:transparent;")
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        scroll.setWidget(container)
+        return scroll, layout
+
+    @staticmethod
+    def _direction_of(action: ActionDiffItem) -> str:
+        parent = PurePosixPath(action.relative_path).parent.as_posix()
+        return "" if parent == "." else parent
+
+    def _direction_button_paths(self, direction: str) -> set[str]:
+        """收集该方向（一级目录）下所有动作的可传输文件相对路径。"""
+        paths: set[str] = set()
+        for action in self.actions:
+            if self._direction_of(action) == direction:
+                paths.update(item.relative_path for item in action.transferable_files)
+        return paths
+
+    def _rebuild_direction_buttons(self) -> None:
+        """根据当前动作清单重建方向快捷按钮（按自然顺序去重，无方向时隐藏整行）。"""
+        layout = self.direction_buttons_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        directions = sorted(
+            {direction for direction in (self._direction_of(action) for action in self.actions) if direction}
+        )
+        self.direction_buttons_scroll.setVisible(bool(directions))
+        for direction in directions:
+            button = QPushButton(direction)
+            button.setCheckable(True)
+            button.setProperty("directionButton", True)
+            button.setToolTip(f"勾选 {direction} 下的所有动作")
+            button.clicked.connect(
+                lambda checked=False, d=direction: self._on_direction_button_toggled(d, checked)
+            )
+            layout.addWidget(button)
+        self._sync_direction_buttons()
+
+    def _sync_direction_buttons(self) -> None:
+        """根据当前选中状态刷新各方向按钮的 checked 态。"""
+        for index in range(self.direction_buttons_layout.count()):
+            button = self.direction_buttons_layout.itemAt(index).widget()
+            if not isinstance(button, QPushButton):
+                continue
+            paths = self._direction_button_paths(button.text())
+            button.setChecked(bool(paths) and paths.issubset(self.selected_paths))
+
+    def _on_direction_button_toggled(self, direction: str, checked: bool) -> None:
+        """点击方向按钮：勾选/取消该方向下所有动作的可传输文件。"""
+        paths = self._direction_button_paths(direction)
+        if not paths:
+            return
+        if checked:
+            self.set_selected_paths(self.selected_paths | paths)
+        else:
+            self.set_selected_paths(self.selected_paths - paths)
 
     def _action_button_paths(self, name: str) -> set[str]:
         """收集所有同名动作的可传输文件相对路径。"""
@@ -306,7 +374,7 @@ class ActionDiffPanel(QWidget):
         for button in self.filter_group.buttons():
             button.setEnabled(enabled)
         self.select_visible_button.setEnabled(enabled)
-        self.select_current_button.setEnabled(enabled)
+        self.select_changed_button.setEnabled(enabled)
         self.clear_selection_button.setEnabled(enabled)
 
     def select_visible(self) -> None:
@@ -317,8 +385,13 @@ class ActionDiffPanel(QWidget):
                 selected.update(item.relative_path for item in action.transferable_files)
         self.set_selected_paths(selected)
 
-    def select_only_current(self) -> None:
-        paths = self._highlighted_transfer_paths()
+    def select_changed(self) -> None:
+        """仅勾选所有有变更动作的可传输文件（替换当前选择，不受过滤和行高亮影响）。"""
+        paths = {
+            item.relative_path
+            for action in self.actions
+            for item in action.transferable_files
+        }
         self.set_selected_paths(paths)
 
     def toggle_highlighted(self) -> None:
