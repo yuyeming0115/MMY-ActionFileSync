@@ -15,11 +15,14 @@ from PySide6.QtWidgets import (
 
 class TransferPanel(QWidget):
     transfer_requested = Signal()
+    cancel_requested = Signal()
     clear_selection_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
         self._busy = False
+        self._current_file = ""
+        self._current_percent = 0
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(5)
@@ -33,6 +36,8 @@ class TransferPanel(QWidget):
         self.details_button.setCheckable(True)
         self.clear_button = QPushButton("清空选择")
         self.clear_button.setEnabled(False)
+        self.cancel_button = QPushButton("取消传输")
+        self.cancel_button.setVisible(False)
         self.transfer_button = QPushButton("传输预览并开始")
         self.transfer_button.setProperty("primaryAction", True)
         self.transfer_button.setEnabled(False)
@@ -40,6 +45,7 @@ class TransferPanel(QWidget):
         summary_row.addSpacing(10)
         summary_row.addWidget(self.status_label, 1)
         summary_row.addWidget(self.details_button)
+        summary_row.addWidget(self.cancel_button)
         summary_row.addWidget(self.clear_button)
         summary_row.addWidget(self.transfer_button)
 
@@ -56,6 +62,7 @@ class TransferPanel(QWidget):
         layout.addWidget(self.log)
 
         self.transfer_button.clicked.connect(self.transfer_requested.emit)
+        self.cancel_button.clicked.connect(self.cancel_requested.emit)
         self.clear_button.clicked.connect(self.clear_selection_requested.emit)
         self.details_button.toggled.connect(self.log.setVisible)
 
@@ -98,6 +105,7 @@ class TransferPanel(QWidget):
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
         self.total_progress.setVisible(busy)
+        self.cancel_button.setVisible(busy)
         if busy:
             self.status_label.setText("正在传输")
             self.transfer_button.setText("传输中…")
@@ -108,7 +116,14 @@ class TransferPanel(QWidget):
             self.transfer_button.setText("传输预览并开始")
 
     def set_file_started(self, relative_path: str) -> None:
-        self.status_label.setText(f"正在复制: {relative_path}")
+        self._current_file = relative_path
+        self._current_percent = 0
+        self.status_label.setText(f"正在复制: {relative_path}  (0%)")
+
+    def set_file_progress(self, percent: int) -> None:
+        self._current_percent = percent
+        if self._current_file:
+            self.status_label.setText(f"正在复制: {self._current_file}  ({percent}%)")
 
     def set_stats(self, success: int, failed: int, skipped: int) -> None:
         self.status_label.setText(f"成功 {success} · 失败 {failed} · 跳过 {skipped}")

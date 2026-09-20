@@ -9,6 +9,8 @@ from models.app_state import AppState
 from models.preview_item import PreviewItem
 from services.action_diff_service import ActionDiffService
 from services.transfer_service import TransferService
+from utils.cancel_token import CancellationToken
+from utils.hash_utils import HashCache
 from views.main_window import MainWindow
 from views.transfer_preview_dialog import TransferPreviewDialog
 from workers.preview_worker import PreviewWorker
@@ -20,7 +22,8 @@ class MainController(MainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.state = AppState()
-        self.action_diff_service = ActionDiffService()
+        self._hash_cache = HashCache()
+        self.action_diff_service = ActionDiffService(hash_cache=self._hash_cache)
         self.transfer_service = TransferService()
         self._active_threads: list[QThread] = []
         self._active_workers: list[object] = []
@@ -30,13 +33,17 @@ class MainController(MainWindow):
         self._skipped = 0
         self._scan_in_progress = False
         self._transfer_in_progress = False
+        self._scan_cancel_token: CancellationToken | None = None
+        self._transfer_cancel_token: CancellationToken | None = None
 
         self.source_target_bar.path_changed.connect(self.on_paths_changed)
         self.source_target_bar.refresh_requested.connect(self.refresh_compare)
+        self.source_target_bar.cancel_requested.connect(self.cancel_scan)
         self.source_target_bar.clear_requested.connect(self.clear_all_lists)
         self.action_diff_panel.action_selected.connect(self.on_action_selected)
         self.action_diff_panel.selection_changed.connect(self.on_selection_changed)
         self.transfer_panel.transfer_requested.connect(self.show_transfer_preview)
+        self.transfer_panel.cancel_requested.connect(self.cancel_transfer)
         self.transfer_panel.clear_selection_requested.connect(self.action_diff_panel.clear_selection)
         self.preview_panel.path_dropped.connect(self._on_preview_path_dropped)
 
@@ -44,8 +51,23 @@ class MainController(MainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self._active_threads:
-            self.source_target_bar.set_scan_status("请等待当前扫描、预览或传输任务完成后关闭", "busy")
-            event.ignore()
+            reply = QMessageBox.question(
+                self,
+                "任务进行中",
+                "当前有正在运行的扫描或传输任务，是否取消并退出？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+            # 请求取消所有任务
+            if self._scan_cancel_token:
+                self._scan_cancel_token.cancel()
+            if self._transfer_cancel_token:
+                self._transfer_cancel_token.cancel()
+            # 给线程一点时间退出，但不阻塞 UI——由 Qt 退出时清理
+            super().closeEvent(event)
             return
         super().closeEvent(event)
 
@@ -95,15 +117,28 @@ class MainController(MainWindow):
         if self._scan_in_progress or self._transfer_in_progress:
             return
         self._scan_in_progress = True
+        self._scan_cancel_token = CancellationToken()
         self.source_target_bar.set_scan_status("正在扫描并对比目录…", "busy")
         self.source_target_bar.set_busy(True)
         self.action_diff_panel.set_controls_enabled(False)
         self.transfer_panel.set_transfer_enabled(False)
-        worker = ScanWorker(self.state.left_root_path, self.state.right_root_path)
+        worker = ScanWorker(
+            self.state.left_root_path,
+            self.state.right_root_path,
+            hash_cache=self._hash_cache,
+            cancel_token=self._scan_cancel_token,
+        )
         self._run_worker(worker, self._on_compare_finished, self._on_worker_failed)
+
+    def cancel_scan(self) -> None:
+        """请求取消当前扫描。"""
+        if self._scan_cancel_token:
+            self._scan_cancel_token.cancel()
+            self.source_target_bar.set_scan_status("正在取消…", "busy")
 
     def _on_compare_finished(self, compare_result) -> None:
         self._scan_in_progress = False
+        self._scan_cancel_token = None
         self.state.compare_result = compare_result
         self.state.action_items = self.action_diff_service.build_actions(compare_result)
         eligible = {
@@ -125,12 +160,17 @@ class MainController(MainWindow):
 
     def _on_worker_failed(self, message: str) -> None:
         self._scan_in_progress = False
+        self._scan_cancel_token = None
         self.source_target_bar.set_busy(False)
         self.action_diff_panel.set_controls_enabled(True)
         self.transfer_panel.set_transfer_enabled(True)
-        self.source_target_bar.set_scan_status("扫描失败", "error")
-        self.transfer_panel.append_log(message, "error")
-        QMessageBox.critical(self, "扫描失败", message)
+        if "取消" in message:
+            self.source_target_bar.set_scan_status("扫描已取消", "idle")
+            self.transfer_panel.append_log(message, "warning")
+        else:
+            self.source_target_bar.set_scan_status("扫描失败", "error")
+            self.transfer_panel.append_log(message, "error")
+            QMessageBox.critical(self, "扫描失败", message)
 
     def on_action_selected(self, relative_path: str) -> None:
         self.state.selected_relative_path = relative_path
@@ -148,7 +188,7 @@ class MainController(MainWindow):
     def load_previews(self, relative_path: str) -> None:
         if not self.state.compare_result:
             return
-        pair = self.state.compare_result.node_map.get(relative_path)
+        pair = self.state.compare_result.node_map.get(relative_path.casefold())
         if not pair:
             return
         self._start_preview_worker("left", relative_path, pair.left)
@@ -161,7 +201,6 @@ class MainController(MainWindow):
     def _on_preview_finished(self, item: PreviewItem) -> None:
         if item.relative_path != self.state.selected_relative_path:
             return
-        self.state.preview_items[item.side] = item
         self.preview_panel.set_preview(item.side, item)
 
     def _on_preview_failed(self, side: str, message: str) -> None:
@@ -207,6 +246,7 @@ class MainController(MainWindow):
             return
         self.transfer_panel.reset_progress()
         self._transfer_in_progress = True
+        self._transfer_cancel_token = CancellationToken()
         self.transfer_panel.set_busy(True)
         self.source_target_bar.set_busy(True)
         self.action_diff_panel.set_controls_enabled(False)
@@ -214,7 +254,13 @@ class MainController(MainWindow):
         self._failed = 0
         self._skipped = 0
         self.transfer_panel.append_log(f"开始传输，共 {job.total_files} 个文件。", "info")
-        self._run_transfer_worker(TransferWorker(job))
+        self._run_transfer_worker(TransferWorker(job, cancel_token=self._transfer_cancel_token))
+
+    def cancel_transfer(self) -> None:
+        """请求取消当前传输。"""
+        if self._transfer_cancel_token:
+            self._transfer_cancel_token.cancel()
+            self.transfer_panel.append_log("正在取消传输…", "warning")
 
     def _run_transfer_worker(self, worker: TransferWorker) -> None:
         thread = QThread(self)
@@ -245,8 +291,10 @@ class MainController(MainWindow):
         )
 
     def _on_progress_changed(self, copied: int, total: int) -> None:
+        # 只更新进度条，不改动 status_label（避免反复冲掉文件名/统计）
         if total:
-            self.transfer_panel.status_label.setText(f"当前文件 {copied * 100 // total}%")
+            percent = copied * 100 // total
+            self.transfer_panel.set_file_progress(percent)
 
     def _on_file_finished(self, index: int, relative_path: str, success: bool) -> None:
         if success:
@@ -265,15 +313,25 @@ class MainController(MainWindow):
 
     def _on_job_completed(self, success: int, failed: int, skipped: int) -> None:
         self._transfer_in_progress = False
+        self._transfer_cancel_token = None
         self.transfer_panel.set_stats(success, failed, skipped)
-        self.transfer_panel.append_log(
-            "传输完成，正在重新扫描。",
-            "success" if failed == 0 else "warning",
-        )
+        was_cancelled = skipped > 0
+        if was_cancelled:
+            self.transfer_panel.append_log(
+                f"传输已取消（成功 {success} · 失败 {failed} · 跳过 {skipped}）。",
+                "warning",
+            )
+        else:
+            self.transfer_panel.append_log(
+                "传输完成，正在重新扫描。",
+                "success" if failed == 0 else "warning",
+            )
         self.transfer_panel.set_busy(False)
         self.source_target_bar.set_busy(False)
         self.action_diff_panel.set_controls_enabled(True)
-        QTimer.singleShot(0, self.refresh_compare)
+        # 取消后不复扫，避免用户等待
+        if not was_cancelled:
+            QTimer.singleShot(0, self.refresh_compare)
 
     def clear_all_lists(self) -> None:
         if self._scan_in_progress or self._transfer_in_progress:

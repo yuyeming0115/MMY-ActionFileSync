@@ -6,10 +6,13 @@ import re
 from models.action_diff import ActionDiffItem, FileDiffItem
 from models.compare_result import ComparePair, CompareResult
 from models.tree_node import TreeNode
-from utils.hash_utils import files_equal
+from utils.hash_utils import HashCache, files_equal
 
 
 class ActionDiffService:
+    def __init__(self, hash_cache: HashCache | None = None) -> None:
+        self._hash_cache = hash_cache
+
     def build_actions(self, result: CompareResult) -> list[ActionDiffItem]:
         action_paths = self._collect_sequence_paths(result.left_root)
         action_paths.update(self._collect_sequence_paths(result.right_root))
@@ -43,16 +46,18 @@ class ActionDiffService:
         }
 
     def _build_action(self, action_path: str, result: CompareResult) -> ActionDiffItem:
-        pair = result.node_map.get(action_path)
+        pair = result.node_map.get(action_path.casefold())
+        # 以 pair 的展示路径（优先来源原始大小写）作为动作的正式路径
+        display_path = pair.relative_path if pair else action_path
         source_node = pair.left if pair else None
         target_node = pair.right if pair else None
         status = pair.status if pair else "unknown"
-        file_diffs = self._collect_file_diffs(action_path, result)
-        self._append_source_auxiliary_files(action_path, source_node, target_node, file_diffs)
+        file_diffs = self._collect_file_diffs(display_path, result)
+        self._append_source_auxiliary_files(display_path, source_node, target_node, file_diffs)
         return ActionDiffItem(
-            action_id=action_path.casefold(),
-            action_name=Path(action_path).name,
-            relative_path=action_path,
+            action_id=display_path.casefold(),
+            action_name=Path(display_path).name,
+            relative_path=display_path,
             status=status,
             source_node=source_node,
             target_node=target_node,
@@ -60,18 +65,20 @@ class ActionDiffService:
         )
 
     def _collect_file_diffs(self, action_path: str, result: CompareResult) -> list[FileDiffItem]:
-        prefix = f"{action_path}/"
+        # node_map 的 key 是 casefold 的，用 casefold prefix 匹配；
+        # 但 FileDiffItem 的 relative_path 使用 pair.relative_path（原始大小写）。
+        prefix = f"{action_path.casefold()}/"
         items: list[FileDiffItem] = []
-        for relative_path, pair in result.node_map.items():
-            if not relative_path.startswith(prefix) or not self._is_image_pair(pair):
+        for _case_key, pair in result.node_map.items():
+            if not pair.relative_path.casefold().startswith(prefix) or not self._is_image_pair(pair):
                 continue
             source = pair.left
             target = pair.right
             size = source.file_size_bytes if source else target.file_size_bytes if target else 0
             items.append(
                 FileDiffItem(
-                    relative_path=relative_path,
-                    name=Path(relative_path).name,
+                    relative_path=pair.relative_path,
+                    name=Path(pair.relative_path).name,
                     status=pair.status,
                     source_path=source.absolute_path if source else None,
                     target_path=target.absolute_path if target else None,
@@ -114,10 +121,11 @@ class ActionDiffService:
                 )
             )
 
-    @staticmethod
-    def _compare_auxiliary_file(source: Path, target: Path | None) -> str:
+    def _compare_auxiliary_file(self, source: Path, target: Path | None) -> str:
         if not target or not target.exists() or not target.is_file():
             return "only_left"
+        if self._hash_cache is not None:
+            return "same" if self._hash_cache.files_equal(source, target) else "different"
         return "same" if files_equal(source, target) else "different"
 
     @staticmethod

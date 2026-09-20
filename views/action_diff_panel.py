@@ -161,7 +161,7 @@ class ActionDiffPanel(QWidget):
         self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.view.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.view.setToolTip("单击动作行即选中传输（再点取消）；Ctrl/Shift 多选后按空格批量勾选")
+        self.view.setToolTip("单击行切换预览；按空格切换勾选；Ctrl/Shift 多选后批量勾选")
         self.view.setIndentation(16)
         self.view.setExpandsOnDoubleClick(False)
         header = self.view.header()
@@ -601,15 +601,10 @@ class ActionDiffPanel(QWidget):
         self._emit_action(current)
 
     def _on_clicked(self, proxy_index) -> None:
-        """单击动作行切换其传输勾选；列0 的 checkbox 由 Qt 内置处理，避免重复 toggle。"""
-        if not proxy_index.isValid() or proxy_index.column() == 0:
-            return
-        source_index = self.proxy.mapToSource(proxy_index.siblingAtColumn(0))
-        item = self.model.itemFromIndex(source_index)
-        obj = item.data(ROLE_OBJECT)
-        if isinstance(obj, ActionDiffItem) and item.isCheckable():
-            new_state = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
-            item.setCheckState(new_state)
+        """单击行切换当前预览；第 0 列复选框由 Qt 内置处理。"""
+        # 单击不改变勾选状态，避免浏览时误操作。
+        # 勾选通过：复选框点击（第 0 列）、空格快捷键、方向/动作快捷按钮。
+        pass
 
     def _emit_action(self, proxy_index) -> None:
         if not proxy_index.isValid():

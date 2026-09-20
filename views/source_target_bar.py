@@ -109,6 +109,7 @@ class PathRoleField(QFrame):
 class SourceTargetBar(QWidget):
     path_changed = Signal(str, str)
     refresh_requested = Signal()
+    cancel_requested = Signal()
     clear_requested = Signal()
 
     def __init__(self) -> None:
@@ -123,12 +124,15 @@ class SourceTargetBar(QWidget):
         self.status_label = QLabel("请选择来源和目标目录")
         self.status_label.setProperty("scanStatus", "idle")
         self.refresh_button = QPushButton("刷新对比")
+        self.cancel_button = QPushButton("取消")
+        self.cancel_button.setVisible(False)
         self.clear_button = QPushButton("清空")
         toolbar.addWidget(title)
         toolbar.addSpacing(12)
         toolbar.addWidget(self.status_label)
         toolbar.addStretch(1)
         toolbar.addWidget(self.refresh_button)
+        toolbar.addWidget(self.cancel_button)
         toolbar.addWidget(self.clear_button)
 
         path_row = QHBoxLayout()
@@ -159,6 +163,7 @@ class SourceTargetBar(QWidget):
         self.source_field.path_changed.connect(lambda _: self._emit_paths())
         self.target_field.path_changed.connect(lambda _: self._emit_paths())
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
+        self.cancel_button.clicked.connect(self.cancel_requested.emit)
         self.clear_button.clicked.connect(self.clear_requested.emit)
 
     def set_paths(self, source: str, target: str) -> None:
@@ -181,7 +186,8 @@ class SourceTargetBar(QWidget):
     def set_busy(self, busy: bool) -> None:
         self.source_field.setEnabled(not busy)
         self.target_field.setEnabled(not busy)
-        self.refresh_button.setEnabled(not busy and all(self.paths()))
+        self.refresh_button.setVisible(not busy)
+        self.cancel_button.setVisible(busy)
         self.clear_button.setEnabled(not busy)
 
     def _emit_paths(self) -> None:

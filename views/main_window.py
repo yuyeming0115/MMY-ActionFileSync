@@ -15,7 +15,7 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
         self.setWindowTitle("MMY-Tools · Action File Sync v0.2.5")
         self.resize(1440, 900)
-        self.setMinimumSize(1100, 720)
+        self.setMinimumSize(1280, 720)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -46,7 +46,7 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(self.action_container)
         self.main_splitter.addWidget(self.preview_container)
         self.action_container.setMinimumWidth(420)
-        self.preview_container.setMinimumWidth(660)
+        self.preview_container.setMinimumWidth(740)
         self.main_splitter.setStretchFactor(0, 40)
         self.main_splitter.setStretchFactor(1, 60)
         self.main_splitter.setSizes([520, 880])

@@ -7,20 +7,35 @@ from natsort import natsorted
 
 from models.tree_node import TreeNode
 from utils.file_utils import IMAGE_EXTENSIONS, build_node_id
-from utils.hash_utils import hash_file
+from utils.hash_utils import HashCache, hash_file
+
+
+class ScanCancelledError(Exception):
+    """扫描被用户取消时抛出。"""
 
 
 class ScanService:
-    def __init__(self, source_type: str) -> None:
+    def __init__(self, source_type: str, hash_cache: HashCache | None = None) -> None:
         self.source_type = source_type
+        self._hash_cache = hash_cache
+        self._cancel_token = None
 
-    def scan(self, root_path: str) -> TreeNode:
+    def scan(self, root_path: str, cancel_token: object | None = None) -> TreeNode:
         root = Path(root_path)
         if not root.exists() or not root.is_dir():
             raise FileNotFoundError(f"目录不存在: {root_path}")
-        return self._build_tree(root, root)
+        self._cancel_token = cancel_token
+        try:
+            return self._build_tree(root, root)
+        finally:
+            self._cancel_token = None
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_token and self._cancel_token.is_cancelled():
+            raise ScanCancelledError("扫描已取消")
 
     def _build_tree(self, base_root: Path, current: Path) -> TreeNode:
+        self._check_cancelled()
         relative = "" if current == base_root else current.relative_to(base_root).as_posix()
         image_files = self._collect_image_files(current)
         gif_path = self._find_gif(current)
@@ -90,4 +105,6 @@ class ScanService:
         return digest.hexdigest()
 
     def _build_image_digest(self, image_path: Path) -> str:
+        if self._hash_cache is not None:
+            return self._hash_cache.hash_file(image_path)
         return hash_file(image_path)

@@ -9,5 +9,5 @@ class BaseSourceAdapter(ABC):
     source_type: str = "base"
 
     @abstractmethod
-    def scan(self, root_path: str) -> TreeNode:
+    def scan(self, root_path: str, cancel_token: object | None = None) -> TreeNode:
         raise NotImplementedError
