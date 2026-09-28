@@ -11,7 +11,9 @@ from services.action_diff_service import ActionDiffService
 from services.transfer_service import TransferService
 from utils.cancel_token import CancellationToken
 from utils.hash_utils import HashCache
+from utils.path_matcher import find_same_name_folder, normalize_path
 from views.main_window import MainWindow
+from views.redundancy_dialog import RedundancyDialog
 from views.transfer_preview_dialog import TransferPreviewDialog
 from workers.preview_worker import PreviewWorker
 from workers.scan_worker import ScanWorker
@@ -40,6 +42,7 @@ class MainController(MainWindow):
         self.source_target_bar.refresh_requested.connect(self.refresh_compare)
         self.source_target_bar.cancel_requested.connect(self.cancel_scan)
         self.source_target_bar.clear_requested.connect(self.clear_all_lists)
+        self.source_target_bar.redundancy_scan_requested.connect(self.open_redundancy_scan)
         self.action_diff_panel.action_selected.connect(self.on_action_selected)
         self.action_diff_panel.selection_changed.connect(self.on_selection_changed)
         self.transfer_panel.transfer_requested.connect(self.show_transfer_preview)
@@ -72,17 +75,69 @@ class MainController(MainWindow):
         super().closeEvent(event)
 
     def on_paths_changed(self, source_path: str, target_path: str) -> None:
+        # 入口统一归一化，保证拖放/对话框/设置恢复等来源的路径可正确比较
+        source_path = normalize_path(source_path)
+        target_path = normalize_path(target_path)
+        source_changed = source_path != self.state.left_root_path
+        target_changed = target_path != self.state.right_root_path
+        final_target = target_path
+
+        # 来源变化（拖入/选择）时，自动在目标侧寻找同名文件夹并填入
+        if source_changed and not target_changed and source_path:
+            final_target = self._auto_match_target(source_path, target_path)
+
+        # 用户手动更换目标时，记住其父目录作为目标根，供后续自动匹配递归兜底
+        if target_changed and final_target and Path(final_target).parent.is_dir():
+            self._save_target_root(normalize_path(str(Path(final_target).parent)))
+
         self.state.left_root_path = source_path
-        self.state.right_root_path = target_path
+        self.state.right_root_path = final_target
         self.settings.setValue("paths/source", source_path)
-        self.settings.setValue("paths/target", target_path)
+        self.settings.setValue("paths/target", final_target)
         self.settings.sync()
-        self.source_target_bar.refresh_button.setEnabled(bool(source_path and target_path))
+        if final_target != target_path:
+            self.source_target_bar.set_paths(source_path, final_target)
+        self.source_target_bar.refresh_button.setEnabled(bool(source_path and final_target))
         self._append_recent("source", source_path)
-        self._append_recent("target", target_path)
+        self._append_recent("target", final_target)
         self._refresh_recent_menus()
-        if source_path and target_path:
+        if source_path and final_target:
             self.refresh_compare()
+
+    def _auto_match_target(self, source_path: str, current_target: str) -> str:
+        """在目标侧寻找与来源末级目录同名的文件夹；找不到则保留原目标。"""
+        name = Path(source_path).name
+        if not name:
+            return current_target
+        roots: list[str] = []
+        if current_target:
+            roots.append(normalize_path(str(Path(current_target).parent)))
+        remembered_root = self._target_root()
+        if remembered_root and remembered_root not in roots:
+            roots.append(remembered_root)
+        matched = find_same_name_folder(name, *roots)
+        if matched:
+            normalized = normalize_path(matched)
+            if normalized != current_target:
+                self.transfer_panel.append_log(f"已自动匹配目标文件夹: {normalized}", "info")
+            return normalized
+        if roots:
+            self.transfer_panel.append_log(
+                f"目标目录下未找到同名文件夹“{name}”，已保留原目标。",
+                "warning",
+            )
+        else:
+            self.transfer_panel.append_log(
+                "目标为空，无法自动匹配同名文件夹；请先手动选择一次目标目录。",
+                "warning",
+            )
+        return current_target
+
+    def _target_root(self) -> str:
+        return str(self.settings.value("paths/target_root", "") or "")
+
+    def _save_target_root(self, root: str) -> None:
+        self.settings.setValue("paths/target_root", root)
 
     def _on_preview_path_dropped(self, role: str, path: str) -> None:
         """预览画布拖入目录：按 role 更新对应来源/目标目录并触发对比。"""
@@ -109,6 +164,14 @@ class MainController(MainWindow):
             self.settings.value("paths/recent_source", []) or [],
             self.settings.value("paths/recent_target", []) or [],
         )
+
+    def open_redundancy_scan(self) -> None:
+        """打开冗余帧扫描工具；若在工具里移动了来源目录下的文件，回来后刷新对比。"""
+        dialog = RedundancyDialog(default_root=self.state.left_root_path or "", parent=self)
+        dialog.exec()
+        scanned_root = normalize_path(dialog.scanned_root())
+        if dialog.moved_anything and scanned_root and scanned_root == normalize_path(self.state.left_root_path):
+            self.refresh_compare()
 
     def refresh_compare(self) -> None:
         if not self.state.left_root_path or not self.state.right_root_path:
@@ -345,8 +408,8 @@ class MainController(MainWindow):
         self.transfer_panel.reset_actions()
 
     def _restore_recent_paths(self) -> None:
-        source = str(self.settings.value("paths/source", "") or "")
-        target = str(self.settings.value("paths/target", "") or "")
+        source = normalize_path(str(self.settings.value("paths/source", "") or ""))
+        target = normalize_path(str(self.settings.value("paths/target", "") or ""))
         self.state.left_root_path = source
         self.state.right_root_path = target
         self.source_target_bar.set_paths(source, target)

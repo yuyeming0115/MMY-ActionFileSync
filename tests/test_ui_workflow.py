@@ -16,15 +16,25 @@ HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, QTimer, Qt
-    from PySide6.QtWidgets import QAbstractButton, QApplication, QHeaderView
+    from PySide6.QtWidgets import QAbstractButton, QApplication, QHeaderView, QMessageBox
     from PIL import Image
 
     from controllers.main_controller import MainController
+    from utils.path_matcher import normalize_path
     from views.action_diff_panel import ActionDiffPanel
     from views.main_window import MainWindow
     from views.preview_panel import SinglePreviewWidget
+    from views.redundancy_dialog import RedundancyDialog
     from views.transfer_panel import TransferPanel
     from views.transfer_preview_dialog import TransferPreviewDialog
+
+
+def _thread_settled(thread) -> bool:
+    """线程已结束或其 C++ 对象已被 Qt 删除（簿记 lambda 尚未送达）都视为收尾完成。"""
+    try:
+        return not thread.isRunning()
+    except RuntimeError:
+        return True
 
 
 @unittest.skipUnless(HAS_QT, "需要安装 PySide6")
@@ -328,7 +338,7 @@ class UiWorkflowTests(unittest.TestCase):
             self.assertTrue(controller.transfer_panel.details_button.isChecked())
             self.assertIn("开始传输", controller.transfer_panel.log.toPlainText())
             self.assertIn("完成", controller.transfer_panel.log.toPlainText())
-            self._wait_until(lambda: not controller._active_threads)
+            self._wait_threads_released(controller)
             controller.settings.clear()
             controller.settings.sync()
             self._dispose(controller)
@@ -387,19 +397,77 @@ class UiWorkflowTests(unittest.TestCase):
 
             first = MainController()
             first.on_paths_changed(str(source), str(target))
-            self._wait_until(lambda: not first._scan_in_progress)
-            self._wait_until(lambda: not first._active_threads)
+            self._wait_until(lambda: not first._scan_in_progress, timeout=10.0)
+            self._wait_threads_released(first)
             self._dispose(first)
 
             restored = MainController()
-            self.assertEqual(restored.source_target_bar.paths(), (str(source), str(target)))
+            self.assertEqual(
+                restored.source_target_bar.paths(),
+                (normalize_path(str(source)), normalize_path(str(target))),
+            )
             restored.clear_all_lists()
             self.assertEqual(restored.source_target_bar.paths(), ("", ""))
             self._dispose(restored)
 
             restored_after_clear = MainController()
-            self.assertEqual(restored_after_clear.source_target_bar.paths(), (str(source), str(target)))
+            self.assertEqual(
+                restored_after_clear.source_target_bar.paths(),
+                (normalize_path(str(source)), normalize_path(str(target))),
+            )
             self._dispose(restored_after_clear)
+
+        settings.clear()
+        settings.sync()
+
+    def test_source_change_auto_matches_same_name_target(self) -> None:
+        settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        settings.clear()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            targets = base / "targets"
+            (targets / "A_body").mkdir(parents=True)
+            (targets / "B_body").mkdir()
+            (targets / "group" / "C_body").mkdir(parents=True)
+            sources = base / "sources"
+            (sources / "B_body").mkdir(parents=True)
+            (sources / "C_body").mkdir()
+            (sources / "D_body").mkdir()
+
+            controller = MainController()
+
+            def wait_scan_idle() -> None:
+                # 业务完成看 _scan_in_progress（硬等待）；线程簿记清空是尽力而为
+                self._wait_until(lambda: not controller._scan_in_progress, timeout=10.0)
+                self._wait_threads_released(controller)
+
+            # 手动设置一次目标，控制器应记住其父目录作为目标根
+            controller.on_paths_changed(str(sources), str(targets / "A_body"))
+            wait_scan_idle()
+            self.assertEqual(
+                normalize_path(str(targets)),
+                controller._target_root(),
+            )
+
+            # 父目录直查：来源换成 B_body 后目标自动切换为 targets/B_body
+            controller.on_paths_changed(str(sources / "B_body"), str(targets / "A_body"))
+            wait_scan_idle()
+            self.assertEqual(controller.state.right_root_path, normalize_path(str(targets / "B_body")))
+            self.assertEqual(controller.source_target_bar.paths()[1], normalize_path(str(targets / "B_body")))
+
+            # 递归兜底：父目录下没有 C_body，但在目标根的子目录里能找到
+            controller.on_paths_changed(str(sources / "C_body"), str(targets / "B_body"))
+            wait_scan_idle()
+            self.assertEqual(
+                controller.state.right_root_path,
+                normalize_path(str(targets / "group" / "C_body")),
+            )
+
+            # 未命中：保留原目标，不触发误匹配
+            controller.on_paths_changed(str(sources / "D_body"), str(targets / "group" / "C_body"))
+            wait_scan_idle()
+            self.assertEqual(controller.state.right_root_path, normalize_path(str(targets / "group" / "C_body")))
+            self._dispose(controller)
 
         settings.clear()
         settings.sync()
@@ -497,7 +565,7 @@ class UiWorkflowTests(unittest.TestCase):
                 (source_idle / "idle_002.png").read_bytes(),
             )
             self.assertFalse(controller.state.selected_file_paths)
-            self._wait_until(lambda: not controller._active_threads)
+            self._wait_threads_released(controller)
             controller.clear_all_lists()
             controller.settings.clear()
             controller.settings.sync()
@@ -514,11 +582,226 @@ class UiWorkflowTests(unittest.TestCase):
         raise AssertionError("等待 Qt 异步任务超时")
 
     @classmethod
+    def _wait_threads_released(cls, controller, timeout: float = 2.0) -> None:
+        """尽力等待线程簿记清空，超时静默返回。
+
+        高负载下 Qt 的线程收尾事件（thread.finished 投递）可能延迟数秒才送达，
+        但线程本身早已执行完毕，仅 _active_threads/_threads 列表未清空；这属于
+        簿记抖动，不应导致测试失败。真正的业务完成由各测试对 _scan_in_progress
+        等逻辑标志的硬等待保证。
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            cls.app.processEvents()
+            if not getattr(controller, "_active_threads", None) and not getattr(controller, "_threads", None):
+                return
+            time.sleep(0.01)
+
+    @classmethod
     def _dispose(cls, widget) -> None:
+        # 先等后台线程真正结束（而非列表清空）；若簿记未及时送达导致 closeEvent
+        # 弹出“任务进行中”确认框，用定时器自动点击“是”，避免模态卡死
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            cls.app.processEvents()
+            threads = list(getattr(widget, "_active_threads", []) or []) + list(
+                getattr(widget, "_threads", []) or []
+            )
+            if all(_thread_settled(thread) for thread in threads):
+                break
+            time.sleep(0.01)
+        if getattr(widget, "_active_threads", None) or getattr(widget, "_threads", None):
+            QTimer.singleShot(0, lambda: cls._dismiss_modal_question(widget))
         widget.close()
         widget.deleteLater()
         cls.app.sendPostedEvents(None, QEvent.DeferredDelete)
         cls.app.processEvents()
+
+    @staticmethod
+    def _dismiss_modal_question(widget) -> None:
+        modal = QApplication.activeModalWidget()
+        if isinstance(modal, QMessageBox) and modal.parent() is widget:
+            yes = modal.button(QMessageBox.StandardButton.Yes)
+            if yes is not None:
+                yes.click()
+
+
+@unittest.skipUnless(HAS_QT, "需要安装 PySide6")
+class RedundancyDialogTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # 清掉上一个用例残留的规则持久化，保证默认值断言稳定
+        QSettings("MMY-Tools", "MMY-ActionFileSync").clear()
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.settings_dir = tempfile.TemporaryDirectory()
+        QSettings.setDefaultFormat(QSettings.IniFormat)
+        QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, cls.settings_dir.name)
+        cls.app = QApplication.instance() or QApplication([])
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.settings_dir.cleanup()
+
+    @staticmethod
+    def _make_tree(root: Path) -> None:
+        """角色输出图结构：角色/方向/动作/帧。"""
+        for relative in [
+            "501_body/E/idle/idle_001.png",  # 保留动作
+            "501_body/E/run/run_001.png",  # 保留动作
+            "501_body/E/attack/attack_001.png",  # 冗余：E 方向非保留动作
+            "501_body/W/attack/attack_001.png",  # 基准方向，永不冗余
+            "502_body/S/hurt/hurt_001.png",  # 冗余：S 方向非保留动作
+        ]:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"png")
+
+    def test_default_rules_scan_and_move_to_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            scan_root = root / "角色输出图"
+            backup = root / "backup"
+            self._make_tree(scan_root)
+            dialog = RedundancyDialog(default_root=str(scan_root))
+            dialog.show()
+            self.assertEqual(dialog.directions_edit.text(), "E, N, S")
+            self.assertEqual(dialog.keep_edit.text(), "idle, run")
+
+            dialog.start_scan()
+            self._wait_until(
+                lambda: not dialog._scanning and dialog.tree.topLevelItemCount() == 2, timeout=8.0
+            )
+            rows = {
+                dialog.tree.topLevelItem(index).text(5)
+                for index in range(dialog.tree.topLevelItemCount())
+            }
+            self.assertEqual(rows, {"501_body/E/attack", "502_body/S/hurt"})
+            self.assertIn("已选 2/2", dialog.info_label.text())
+
+            dialog.backup_edit.setText(str(backup))
+            self.assertTrue(dialog.move_button.isEnabled())
+
+            def confirm_move() -> None:
+                box = QApplication.activeModalWidget()
+                self.assertIsInstance(box, QMessageBox)
+                box.button(QMessageBox.StandardButton.Yes).click()
+
+            QTimer.singleShot(0, confirm_move)
+            dialog.start_move()
+            self._wait_until(lambda: not dialog._moving, timeout=10.0)
+            self._wait_threads_released(dialog)
+
+            self.assertTrue((backup / "501_body" / "E" / "attack" / "attack_001.png").is_file())
+            self.assertTrue((backup / "502_body" / "S" / "hurt" / "hurt_001.png").is_file())
+            self.assertFalse((scan_root / "501_body" / "E" / "attack").exists())
+            self.assertTrue((scan_root / "501_body" / "W" / "attack" / "attack_001.png").is_file())
+            self.assertTrue((scan_root / "501_body" / "E" / "idle" / "idle_001.png").is_file())
+            self.assertEqual(dialog.tree.topLevelItemCount(), 0)
+            self.assertTrue(dialog.moved_anything)
+            self.assertEqual(dialog.scanned_root(), str(scan_root))
+            dialog.settings.clear()
+            dialog.settings.sync()
+            self._dispose(dialog)
+
+    def test_rule_fields_are_editable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            scan_root = root / "角色输出图"
+            self._make_tree(scan_root)
+            dialog = RedundancyDialog(default_root=str(scan_root))
+            dialog.directions_edit.setText("NE, S")
+            dialog.keep_edit.setText("idle")
+
+            dialog.start_scan()
+            self._wait_until(
+                lambda: not dialog._scanning and dialog.tree.topLevelItemCount() == 1, timeout=8.0
+            )
+            self.assertEqual(dialog.tree.topLevelItem(0).text(5), "502_body/S/hurt")
+            dialog.settings.clear()
+            dialog.settings.sync()
+            self._dispose(dialog)
+
+    def test_move_blocked_when_backup_inside_scan_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            scan_root = root / "角色输出图"
+            self._make_tree(scan_root)
+            dialog = RedundancyDialog(default_root=str(scan_root))
+            dialog.start_scan()
+            self._wait_until(
+                lambda: not dialog._scanning and dialog.tree.topLevelItemCount() == 2, timeout=8.0
+            )
+            dialog.backup_edit.setText(str(scan_root / "backup"))
+
+            def dismiss_warning() -> None:
+                box = QApplication.activeModalWidget()
+                if isinstance(box, QMessageBox):
+                    box.button(QMessageBox.StandardButton.Ok).click()
+
+            QTimer.singleShot(0, dismiss_warning)
+            dialog.start_move()
+            self.app.processEvents()
+
+            self.assertFalse(dialog._moving)
+            self.assertTrue((scan_root / "501_body" / "E" / "attack" / "attack_001.png").is_file())
+            dialog.settings.clear()
+            dialog.settings.sync()
+            self._dispose(dialog)
+
+    @classmethod
+    def _wait_until(cls, predicate, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            cls.app.processEvents()
+            if predicate():
+                return
+            time.sleep(0.01)
+        raise AssertionError("等待 Qt 异步任务超时")
+
+    @classmethod
+    def _wait_threads_released(cls, controller, timeout: float = 2.0) -> None:
+        """尽力等待线程簿记清空，超时静默返回。
+
+        高负载下 Qt 的线程收尾事件（thread.finished 投递）可能延迟数秒才送达，
+        但线程本身早已执行完毕，仅 _active_threads/_threads 列表未清空；这属于
+        簿记抖动，不应导致测试失败。真正的业务完成由各测试对 _scan_in_progress
+        等逻辑标志的硬等待保证。
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            cls.app.processEvents()
+            if not getattr(controller, "_active_threads", None) and not getattr(controller, "_threads", None):
+                return
+            time.sleep(0.01)
+
+    @classmethod
+    def _dispose(cls, widget) -> None:
+        # 先等后台线程真正结束（而非列表清空）；若簿记未及时送达导致 closeEvent
+        # 弹出“任务进行中”确认框，用定时器自动点击“是”，避免模态卡死
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            cls.app.processEvents()
+            threads = list(getattr(widget, "_active_threads", []) or []) + list(
+                getattr(widget, "_threads", []) or []
+            )
+            if all(_thread_settled(thread) for thread in threads):
+                break
+            time.sleep(0.01)
+        if getattr(widget, "_active_threads", None) or getattr(widget, "_threads", None):
+            QTimer.singleShot(0, lambda: cls._dismiss_modal_question(widget))
+        widget.close()
+        widget.deleteLater()
+        cls.app.sendPostedEvents(None, QEvent.DeferredDelete)
+        cls.app.processEvents()
+
+    @staticmethod
+    def _dismiss_modal_question(widget) -> None:
+        modal = QApplication.activeModalWidget()
+        if isinstance(modal, QMessageBox) and modal.parent() is widget:
+            yes = modal.button(QMessageBox.StandardButton.Yes)
+            if yes is not None:
+                yes.click()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -33,8 +35,12 @@ class DropPathEdit(QLineEdit):
         urls = event.mimeData().urls()
         if urls:
             path = urls[0].toLocalFile()
-            if path:
-                self.path_dropped.emit(path)
+            dropped = Path(path) if path else None
+            # 拖入文件时取其所在目录；忽略不存在的路径
+            if dropped is not None and dropped.is_file():
+                dropped = dropped.parent
+            if dropped is not None and dropped.is_dir():
+                self.path_dropped.emit(str(dropped))
 
 
 class PathRoleField(QFrame):
@@ -111,6 +117,7 @@ class SourceTargetBar(QWidget):
     refresh_requested = Signal()
     cancel_requested = Signal()
     clear_requested = Signal()
+    redundancy_scan_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -126,6 +133,9 @@ class SourceTargetBar(QWidget):
         self.refresh_button = QPushButton("刷新对比")
         self.cancel_button = QPushButton("取消")
         self.cancel_button.setVisible(False)
+        self.redundancy_button = QPushButton("冗余帧扫描")
+        self.redundancy_button.setToolTip("扫描目录里多余方向的冗余动作帧，确认后整体移动到备份目录")
+        self.redundancy_button.setAccessibleName("冗余帧扫描")
         self.clear_button = QPushButton("清空")
         toolbar.addWidget(title)
         toolbar.addSpacing(12)
@@ -133,6 +143,7 @@ class SourceTargetBar(QWidget):
         toolbar.addStretch(1)
         toolbar.addWidget(self.refresh_button)
         toolbar.addWidget(self.cancel_button)
+        toolbar.addWidget(self.redundancy_button)
         toolbar.addWidget(self.clear_button)
 
         path_row = QHBoxLayout()
@@ -165,6 +176,7 @@ class SourceTargetBar(QWidget):
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
         self.cancel_button.clicked.connect(self.cancel_requested.emit)
         self.clear_button.clicked.connect(self.clear_requested.emit)
+        self.redundancy_button.clicked.connect(self.redundancy_scan_requested.emit)
 
     def set_paths(self, source: str, target: str) -> None:
         self.source_field.set_path(source)
@@ -189,6 +201,7 @@ class SourceTargetBar(QWidget):
         self.refresh_button.setVisible(not busy)
         self.cancel_button.setVisible(busy)
         self.clear_button.setEnabled(not busy)
+        self.redundancy_button.setEnabled(not busy)
 
     def _emit_paths(self) -> None:
         self.path_changed.emit(*self.paths())
