@@ -16,6 +16,7 @@ HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, QTimer, Qt
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QAbstractButton, QApplication, QHeaderView, QMessageBox
     from PIL import Image
 
@@ -210,7 +211,7 @@ class UiWorkflowTests(unittest.TestCase):
         layout = panel.direction_buttons_layout
         buttons = [layout.itemAt(index).widget() for index in range(layout.count())]
         self.assertEqual([button.text() for button in buttons], ["E", "NW", "SE"])
-        self.assertFalse(panel.direction_buttons_scroll.isHidden())
+        self.assertFalse(panel.direction_buttons_row.isHidden())
 
         nw_button = buttons[1]
         nw_button.click()
@@ -228,9 +229,197 @@ class UiWorkflowTests(unittest.TestCase):
         panel = ActionDiffPanel()
         panel.populate([action])
 
-        self.assertTrue(panel.direction_buttons_scroll.isHidden())
+        self.assertTrue(panel.direction_buttons_row.isHidden())
         self.assertEqual(panel.direction_buttons_layout.count(), 0)
         self._dispose(panel)
+
+    @staticmethod
+    def _make_direction_action(direction: str, name: str, status: str) -> ActionDiffItem:
+        return ActionDiffItem(
+            action_id=f"{direction}/{name}",
+            action_name=name,
+            relative_path=f"{direction}/{name}",
+            status=status,
+            source_node=None,
+            target_node=None,
+            file_diffs=[
+                FileDiffItem(
+                    f"{direction}/{name}/{name}_001.png",
+                    f"{name}_001.png",
+                    status,
+                    "source" if status != "only_right" else None,
+                    "target" if status != "only_left" else None,
+                    100,
+                )
+            ],
+        )
+
+    def test_direction_compass_context_marks_availability_and_changes(self) -> None:
+        actions = [
+            self._make_direction_action("SE", "idle", "different"),
+            self._make_direction_action("N", "idle", "same"),
+            self._make_direction_action("W", "idle", "only_left"),
+            self._make_direction_action("W", "run", "same"),
+        ]
+        panel = ActionDiffPanel()
+        panel.populate(actions)
+        widget = SinglePreviewWidget("来源｜新动作", "source")
+        widget.set_direction_context("SE", "idle", panel.directions_for("idle"), panel.all_directions())
+
+        compass = widget.compass
+        buttons = {direction: compass.button_for(direction) for direction in ("SE", "N", "W")}
+        self.assertTrue(compass.isVisibleTo(widget.canvas))
+        self.assertTrue(buttons["SE"].isEnabled() and buttons["SE"].isChecked())
+        self.assertEqual(buttons["SE"].change_color, "#e0a040")
+        self.assertTrue(buttons["N"].isEnabled() and not buttons["N"].isChecked())
+        self.assertEqual(buttons["N"].toolTip(), "预览 N/idle")
+        self.assertIsNone(buttons["N"].change_color)
+        self.assertTrue(buttons["W"].isEnabled())
+        self.assertEqual(buttons["W"].change_color, "#4caf50")
+        for direction in ("NW", "NE", "E", "SW", "S"):
+            self.assertTrue(compass.button_for(direction).isHidden())
+
+        received: list[str] = []
+        widget.direction_clicked.connect(received.append)
+        buttons["N"].click()
+        self.assertEqual(received, ["N"])
+
+        # run 只在 W 下存在：其余方向禁用且不可触发
+        widget.set_direction_context("W", "run", panel.directions_for("run"), panel.all_directions())
+        self.assertTrue(buttons["W"].isEnabled() and buttons["W"].isChecked())
+        self.assertFalse(buttons["N"].isEnabled())
+        received.clear()
+        buttons["N"].click()
+        self.assertEqual(received, [])
+
+        # 无上下文（未选动作/无方向层）时整层隐藏
+        widget.set_direction_context("", "", {}, set())
+        self.assertTrue(compass.isHidden())
+        self._dispose(panel)
+        self._dispose(widget)
+
+    def test_direction_compass_matches_case_insensitive_directions(self) -> None:
+        actions = [self._make_direction_action("nw", "idle", "different")]
+        panel = ActionDiffPanel()
+        panel.populate(actions)
+        widget = SinglePreviewWidget("来源｜新动作", "source")
+        widget.set_direction_context("nw", "idle", panel.directions_for("idle"), panel.all_directions())
+
+        nw = widget.compass.button_for("NW")
+        self.assertTrue(nw.isVisibleTo(widget.canvas) and nw.isEnabled())
+        received: list[str] = []
+        widget.direction_clicked.connect(received.append)
+        nw.click()
+        self.assertEqual(received, ["NW"])
+        self._dispose(panel)
+        self._dispose(widget)
+
+    def test_compass_button_hit_by_real_mouse_click(self) -> None:
+        """真实鼠标命中测试：覆盖层绝不能挡住方向按钮的点击。
+
+        QTest 的 QWidget 重载会把事件直接发给目标控件、绕过命中测试，测不出
+        覆盖层挡点击的问题（WA_TransparentForMouseEvents 就曾导致整棵子树
+        收不到真实点击）；必须走 windowHandle 的窗口级分发路径。
+        """
+        widget = SinglePreviewWidget("来源｜新动作", "source")
+        widget.set_direction_context("NW", "attack", {"NW": "same", "N": "same"}, {"NW", "N"})
+        widget.resize(420, 480)
+        widget.show()
+        self.app.processEvents()
+
+        button = widget.compass.button_for("N")
+        received: list[str] = []
+        widget.direction_clicked.connect(received.append)
+        window_pos = widget.mapFromGlobal(button.mapToGlobal(button.rect().center()))
+        QTest.mouseClick(widget.windowHandle(), Qt.LeftButton, Qt.NoModifier, window_pos)
+        self.assertEqual(received, ["N"])
+        self._dispose(widget)
+
+    def test_jump_to_action_relaxes_filter_and_selects_row(self) -> None:
+        actions = [
+            self._make_direction_action("NW", "idle", "different"),
+            self._make_direction_action("SE", "idle", "same"),
+        ]
+        panel = ActionDiffPanel()
+        received: list[str] = []
+        relaxed: list[str] = []
+        panel.action_selected.connect(received.append)
+        panel.jump_filter_relaxed.connect(relaxed.append)
+        panel.populate(actions)  # 默认「待更新」过滤：SE/idle 被隐藏
+        received.clear()
+
+        self.assertTrue(panel.jump_to_action("SE/idle"))
+        self.assertEqual(received, ["SE/idle"])
+        self.assertEqual(relaxed, ["SE/idle"])
+        self.assertEqual(panel.proxy.status_filter, "all")
+        self.assertTrue(panel.filter_buttons["all"].isChecked())
+
+        # casefold 定位；重复跳转同一行不重复发信号
+        self.assertTrue(panel.jump_to_action("se/idle"))
+        self.assertEqual(received, ["SE/idle"])
+        self.assertEqual(relaxed, ["SE/idle"])
+
+        self.assertFalse(panel.jump_to_action("N/idle"))
+        self._dispose(panel)
+
+    def test_status_filter_hides_same_action_despite_placeholder_row(self) -> None:
+        panel = ActionDiffPanel()
+        panel.populate(
+            [
+                self._make_direction_action("NW", "idle", "different"),
+                self._make_direction_action("SE", "idle", "same"),
+            ]
+        )
+
+        # 「待更新」过滤下 SE/idle 必须隐藏（占位子行不再无条件放行）
+        self.assertEqual(panel.proxy.rowCount(), 1)
+
+        # 父动作可见时，其文件子行正常显示
+        panel.view.expand(panel.proxy.index(0, 0))
+        self.assertEqual(panel.proxy.rowCount(panel.proxy.index(0, 0)), 1)
+
+        panel._apply_status_filter("all")
+        self.assertEqual(panel.proxy.rowCount(), 2)
+        self._dispose(panel)
+
+    def test_direction_and_action_buttons_unstick_when_nothing_transferable(self) -> None:
+        actions = [
+            self._make_direction_action("SE", "idle", "same"),
+            self._make_direction_action("N", "block", "same"),
+        ]
+        panel = ActionDiffPanel()
+        panel.populate(actions)
+        direction_buttons = [
+            panel.direction_buttons_layout.itemAt(index).widget()
+            for index in range(panel.direction_buttons_layout.count())
+        ]
+        action_buttons = [
+            panel.action_buttons_layout.itemAt(index).widget()
+            for index in range(panel.action_buttons_layout.count())
+        ]
+
+        # 全部已一致（无可传输文件）：点击不应把按钮留在 checked 视觉态
+        direction_buttons[0].click()
+        action_buttons[0].click()
+        self.assertFalse(direction_buttons[0].isChecked())
+        self.assertFalse(action_buttons[0].isChecked())
+        self.assertEqual(panel.selected_paths, set())
+        self._dispose(panel)
+
+    def test_compass_toggle_persists_across_restart(self) -> None:
+        settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        settings.clear()
+        settings.setValue("preview/compass_visible", False)
+        settings.sync()
+        window = MainWindow()
+        self.assertFalse(window.preview_panel.compass_visible)
+        self.assertFalse(window.preview_panel.left_preview.compass.user_visible)
+
+        window.preview_panel.set_compass_visible(True)
+        self.assertTrue(window.preview_panel.left_preview.compass.user_visible)
+        self._dispose(window)
+        settings.clear()
+        settings.sync()
 
     def test_transfer_preview_columns_are_resizable_and_persist(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

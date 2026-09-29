@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from models.preview_item import PreviewItem
+from views.direction_compass import DirectionCompass
 
 
 STATUS_EMPTY_TEXT = {
@@ -160,6 +163,7 @@ class ElidedPathLabel(QLabel):
 
 class SinglePreviewWidget(QWidget):
     path_dropped = Signal(str, str)
+    direction_clicked = Signal(str)
 
     def __init__(self, title: str, role: str) -> None:
         super().__init__()
@@ -197,6 +201,11 @@ class SinglePreviewWidget(QWidget):
         self.canvas.resized.connect(self._render_current_frame)
         self.canvas.path_dropped.connect(lambda p: self.path_dropped.emit(self._role, p))
 
+        # 方向罗盘：覆盖层对鼠标透明（不挡拖放），仅 8 个方向按钮接收点击。
+        self.compass = DirectionCompass(self.canvas)
+        self.compass.direction_clicked.connect(self.direction_clicked)
+        self.canvas.resized.connect(self._sync_compass_geometry)
+
         self.meta_label = QLabel("尺寸: - · 帧: -")
         self.meta_label.setProperty("secondaryText", True)
         self.meta_label.setFixedHeight(self.meta_label.fontMetrics().height() + 6)
@@ -232,7 +241,7 @@ class SinglePreviewWidget(QWidget):
         self._static_pixmap = QPixmap()
         self._frame_pixmaps = []
         self._progress = 0.0
-        self.action_label.setText(self._action_name(item.relative_path))
+        self.action_label.setText(self._action_label(item.relative_path))
         self.path_label.set_path(item.source_path or "-")
 
         if item.status == "ready":
@@ -272,7 +281,24 @@ class SinglePreviewWidget(QWidget):
         self.action_label.setText("未选择动作")
         self.path_label.set_path("-")
         self.meta_label.setText("尺寸: - · 帧: -")
+        self.compass.set_context("", "", {})
         self._set_empty_state("请选择动作以预览")
+
+    def set_direction_context(
+        self,
+        current_direction: str,
+        action_name: str,
+        direction_status: dict[str, str],
+        known_directions: set[str],
+    ) -> None:
+        """同步方向罗盘：当前方向高亮、同名动作可用性、变更圆点。"""
+        self.compass.set_context(current_direction, action_name, direction_status, known_directions)
+
+    def set_compass_visible(self, visible: bool) -> None:
+        self.compass.set_user_visible(visible)
+
+    def _sync_compass_geometry(self) -> None:
+        self.compass.setGeometry(self.canvas.rect())
 
     def _render_current_frame(self) -> None:
         pixmap = self.pixmap_at_progress(self._progress)
@@ -339,8 +365,13 @@ class SinglePreviewWidget(QWidget):
         return min(count - 1, max(0, round(progress * (count - 1))))
 
     @staticmethod
-    def _action_name(relative_path: str) -> str:
-        return relative_path.rstrip("/").split("/")[-1] if relative_path else "未选择动作"
+    def _action_label(relative_path: str) -> str:
+        """预览标题：带方向前缀（如 "SE · idle"），无方向层时只显示动作名。"""
+        if not relative_path:
+            return "未选择动作"
+        path = PurePosixPath(relative_path)
+        parent = path.parent.as_posix()
+        return f"{parent} · {path.name}" if parent and parent != "." else path.name
 
 
 class BlinkPreviewWidget(QWidget):
@@ -431,6 +462,7 @@ class BlinkPreviewWidget(QWidget):
 
 class PreviewPanel(QWidget):
     path_dropped = Signal(str, str)
+    direction_clicked = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -459,15 +491,25 @@ class PreviewPanel(QWidget):
         self.blink_button.setProperty("segment", True)
         self.mode_group.addButton(self.parallel_button, 0)
         self.mode_group.addButton(self.blink_button, 1)
+        self.compass_toggle = QToolButton()
+        self.compass_toggle.setText("方向罗盘")
+        self.compass_toggle.setCheckable(True)
+        self.compass_toggle.setChecked(True)
+        self.compass_toggle.setToolTip("在预览画布上显示八方向罗盘；点击热区可跳转到该方向的同名动作")
+        self.compass_toggle.setAccessibleName("方向罗盘开关")
+        self.compass_toggle.setProperty("compassToggle", True)
         header.addWidget(title)
         header.addStretch(1)
         header.addWidget(self.parallel_button)
         header.addWidget(self.blink_button)
+        header.addWidget(self.compass_toggle)
 
         self.left_preview = SinglePreviewWidget("来源｜新动作", "source")
         self.right_preview = SinglePreviewWidget("目标｜SVN", "target")
         self.left_preview.path_dropped.connect(self.path_dropped)
         self.right_preview.path_dropped.connect(self.path_dropped)
+        self.left_preview.direction_clicked.connect(self.direction_clicked)
+        self.right_preview.direction_clicked.connect(self.direction_clicked)
         parallel_page = QWidget()
         parallel_layout = QHBoxLayout(parallel_page)
         parallel_layout.setContentsMargins(0, 0, 0, 0)
@@ -539,12 +581,34 @@ class PreviewPanel(QWidget):
         self.reset_offset_button.clicked.connect(lambda: self.offset_slider.setValue(0))
         self.offset_slider.valueChanged.connect(self._on_offset_changed)
         self.mode_group.idClicked.connect(self._set_mode)
+        self.compass_toggle.toggled.connect(self._on_compass_toggled)
         self._play_timer.start(80)
 
     def set_preview(self, side: str, item: PreviewItem) -> None:
         preview = self.left_preview if side == "left" else self.right_preview
         preview.set_preview(item)
         self._reset_timeline()
+
+    def set_direction_context(
+        self,
+        current_direction: str,
+        action_name: str,
+        direction_status: dict[str, str],
+        known_directions: set[str],
+    ) -> None:
+        self.left_preview.set_direction_context(current_direction, action_name, direction_status, known_directions)
+        self.right_preview.set_direction_context(current_direction, action_name, direction_status, known_directions)
+
+    @property
+    def compass_visible(self) -> bool:
+        return self.compass_toggle.isChecked()
+
+    def set_compass_visible(self, visible: bool) -> None:
+        self.compass_toggle.setChecked(visible)
+
+    def _on_compass_toggled(self, checked: bool) -> None:
+        self.left_preview.set_compass_visible(checked)
+        self.right_preview.set_compass_visible(checked)
 
     def clear_all(self) -> None:
         self.left_preview.clear_preview()

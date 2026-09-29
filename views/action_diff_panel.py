@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
-from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, QSortFilterProxyModel, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QLayout,
+    QLayoutItem,
     QPushButton,
     QScrollArea,
     QTreeView,
@@ -70,13 +72,19 @@ class ActionFilterProxyModel(QSortFilterProxyModel):
             self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row, source_parent) -> bool:  # type: ignore[override]
-        if source_parent.isValid():
-            return True
         model = self.sourceModel()
         index = model.index(source_row, 0, source_parent)
-        status = index.data(ROLE_STATUS)
-        searchable = str(index.data(ROLE_SEARCH) or "").casefold()
-        transferable = bool(index.data(ROLE_TRANSFERABLE))
+        if source_parent.isValid():
+            # 子文件行继承父动作的过滤条件；占位行不能无条件放行，
+            # 否则递归过滤会用它“救回”被状态过滤隐藏的父行（过滤失效）。
+            parent = source_parent.siblingAtColumn(0)
+            status = parent.data(ROLE_STATUS)
+            searchable = str(parent.data(ROLE_SEARCH) or "").casefold()
+            transferable = bool(parent.data(ROLE_TRANSFERABLE))
+        else:
+            status = index.data(ROLE_STATUS)
+            searchable = str(index.data(ROLE_SEARCH) or "").casefold()
+            transferable = bool(index.data(ROLE_TRANSFERABLE))
         if self.search_text and self.search_text not in searchable:
             return False
         if self.status_filter == "all":
@@ -86,9 +94,122 @@ class ActionFilterProxyModel(QSortFilterProxyModel):
         return status == self.status_filter
 
 
+class FlowLayout(QLayout):
+    """按容器宽度自动换行的流式布局；行高随内容增长，不出现横向滚动条。"""
+
+    def __init__(self, parent: QWidget | None = None, spacing: int = 6) -> None:
+        super().__init__(parent)
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(spacing)
+        self._items: list[QLayoutItem] = []
+
+    def addItem(self, item: QLayoutItem) -> None:  # type: ignore[override]
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> QLayoutItem | None:
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int) -> QLayoutItem | None:
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> Qt.Orientations:  # type: ignore[override]
+        return Qt.Orientations()
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect: QRect) -> None:  # type: ignore[override]
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        margins = self.contentsMargins()
+        effective = rect.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
+        spacing = self.spacing()
+        x, y = effective.x(), effective.y()
+        line_height = 0
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + spacing
+            if next_x - spacing > effective.right() + 1 and line_height > 0:
+                x = effective.x()
+                y = y + line_height + spacing
+                next_x = x + hint.width() + spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + margins.bottom()
+
+
+class ButtonRowArea(QScrollArea):
+    """按宽度换行的快捷按钮行：高度贴合内容，最多显示两行，超出才走纵向滚动。
+
+    横向滚动条永远不出现（用户要求按钮自适应适配宽度）；行高随内容收缩，
+    避免大量动作时按钮行把清单树挤没。
+    """
+
+    MAX_LINES = 2
+
+    def __init__(self, accessible_name: str) -> None:
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setAccessibleName(accessible_name)
+        self._row = QWidget()
+        self._row.setStyleSheet("background:transparent;")
+        self._flow = FlowLayout(self._row, spacing=6)
+        self.setWidget(self._row)
+        self.sync_height()
+
+    def flow(self) -> FlowLayout:
+        return self._flow
+
+    def sync_height(self) -> None:
+        """按当前内容与可视宽度调整行高，在增删按钮和宽度变化后调用。"""
+        line = self._line_height()
+        cap = line * self.MAX_LINES + self._flow.spacing() * (self.MAX_LINES - 1)
+        content = self._flow.heightForWidth(max(1, self.viewport().width()))
+        self.setFixedHeight(max(line, min(content, cap)))
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self.sync_height()
+
+    def _line_height(self) -> int:
+        item = self._flow.itemAt(0)
+        hint = item.sizeHint().height() if item is not None else 0
+        return max(hint, self.fontMetrics().height() + 10)
+
+
 class ActionDiffPanel(QWidget):
     action_selected = Signal(str)
     selection_changed = Signal(object)
+    jump_filter_relaxed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -145,9 +266,9 @@ class ActionDiffPanel(QWidget):
         search_row.addWidget(self.select_changed_button)
         search_row.addWidget(self.clear_selection_button)
 
-        self.direction_buttons_scroll, self.direction_buttons_layout = self._make_button_row("方向快捷选择")
-        self.direction_buttons_scroll.hide()
-        self.action_buttons_scroll, self.action_buttons_layout = self._make_button_row("动作快捷选择")
+        self.direction_buttons_row, self.direction_buttons_layout = self._make_button_row("方向快捷选择")
+        self.direction_buttons_row.hide()
+        self.action_buttons_row, self.action_buttons_layout = self._make_button_row("动作快捷选择")
 
         self.model = QStandardItemModel(self)
         self.model.setHorizontalHeaderLabels(["选择", "方向", "目录", "动作", "状态", "变化", "大小"])
@@ -178,8 +299,8 @@ class ActionDiffPanel(QWidget):
         layout.addLayout(title_row)
         layout.addLayout(filter_row)
         layout.addLayout(search_row)
-        layout.addWidget(self.direction_buttons_scroll)
-        layout.addWidget(self.action_buttons_scroll)
+        layout.addWidget(self.direction_buttons_row)
+        layout.addWidget(self.action_buttons_row)
         layout.addWidget(self.view, 1)
 
         self.filter_group.buttonClicked.connect(self._on_filter_changed)
@@ -243,22 +364,66 @@ class ActionDiffPanel(QWidget):
         self._sync_action_buttons()
         self._emit_selection()
 
+    def all_directions(self) -> set[str]:
+        """清单中出现过的方向目录集合（大小写以目录为准）。"""
+        return {direction for direction in (self._direction_of(action) for action in self.actions) if direction}
+
+    def directions_for(self, action_name: str) -> dict[str, str]:
+        """包含同名动作的方向映射：方向 -> 动作状态（动作名 casefold 匹配）。"""
+        target = action_name.casefold()
+        result: dict[str, str] = {}
+        for action in self.actions:
+            if action.action_name.casefold() == target:
+                direction = self._direction_of(action)
+                if direction:
+                    result[direction] = action.status
+        return result
+
+    def jump_to_action(self, relative_path: str) -> bool:
+        """把清单当前行定位到指定动作并触发预览联动。
+
+        目标行被状态过滤/搜索隐藏时自动放宽（过滤切到「全部」、必要时清空搜索），
+        放宽动作通过 jump_filter_relaxed 通知外部记日志。返回是否成功定位。
+        """
+        target = relative_path.casefold()
+        row = next(
+            (index for index, action in enumerate(self.actions) if action.relative_path.casefold() == target),
+            None,
+        )
+        if row is None:
+            return False
+        source_index = self.model.index(row, 0)
+        proxy_index = self.proxy.mapFromSource(source_index)
+        relaxed = False
+        if not proxy_index.isValid() and self.proxy.status_filter != "all":
+            self._apply_status_filter("all")
+            relaxed = True
+            proxy_index = self.proxy.mapFromSource(source_index)
+        if not proxy_index.isValid() and self.search_edit.text():
+            self.search_edit.clear()
+            relaxed = True
+            proxy_index = self.proxy.mapFromSource(source_index)
+        if not proxy_index.isValid():
+            return False
+        if relaxed:
+            self.jump_filter_relaxed.emit(relative_path)
+        self.view.scrollTo(proxy_index, QAbstractItemView.EnsureVisible)
+        self.view.setCurrentIndex(proxy_index)
+        return True
+
+    def _apply_status_filter(self, value: str) -> None:
+        """以编程方式切换状态过滤，并同步过滤按钮的选中态。"""
+        button = self.filter_buttons.get(value)
+        if button is not None:
+            button.setChecked(True)
+        self.proxy.set_status_filter(value)
+        self._update_visible_label()
+
     @staticmethod
-    def _make_button_row(accessible_name: str) -> tuple[QScrollArea, QHBoxLayout]:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setFixedHeight(40)
-        scroll.setAccessibleName(accessible_name)
-        container = QWidget()
-        container.setStyleSheet("background:transparent;")
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        scroll.setWidget(container)
-        return scroll, layout
+    def _make_button_row(accessible_name: str) -> tuple[ButtonRowArea, FlowLayout]:
+        """按钮行容器：按钮按可用宽度自动换行，不出现横向滚动条。"""
+        row = ButtonRowArea(accessible_name)
+        return row, row.flow()
 
     @staticmethod
     def _direction_of(action: ActionDiffItem) -> str:
@@ -285,7 +450,7 @@ class ActionDiffPanel(QWidget):
         directions = sorted(
             {direction for direction in (self._direction_of(action) for action in self.actions) if direction}
         )
-        self.direction_buttons_scroll.setVisible(bool(directions))
+        self.direction_buttons_row.setVisible(bool(directions))
         for direction in directions:
             button = QPushButton(direction)
             button.setCheckable(True)
@@ -296,6 +461,7 @@ class ActionDiffPanel(QWidget):
             )
             layout.addWidget(button)
         self._sync_direction_buttons()
+        self.direction_buttons_row.sync_height()
 
     def _sync_direction_buttons(self) -> None:
         """根据当前选中状态刷新各方向按钮的 checked 态。"""
@@ -310,6 +476,9 @@ class ActionDiffPanel(QWidget):
         """点击方向按钮：勾选/取消该方向下所有动作的可传输文件。"""
         paths = self._direction_button_paths(direction)
         if not paths:
+            # 该方向没有可传输文件（如全部已一致）：勾选不生效，
+            # 但 Qt 已翻转按钮视觉状态，需同步回真实选中状态（避免“空点亮起”）。
+            self._sync_direction_buttons()
             return
         if checked:
             self.set_selected_paths(self.selected_paths | paths)
@@ -348,6 +517,7 @@ class ActionDiffPanel(QWidget):
             )
             layout.addWidget(button)
         self._sync_action_buttons()
+        self.action_buttons_row.sync_height()
 
     def _sync_action_buttons(self) -> None:
         """根据当前选中状态刷新各动作按钮的 checked 态。"""
@@ -362,6 +532,8 @@ class ActionDiffPanel(QWidget):
         """点击动作按钮：勾选/取消该动作在所有方向下的可传输文件。"""
         paths = self._action_button_paths(name)
         if not paths:
+            # 无可传输文件时勾选不生效，同步回真实选中状态（避免“空点亮起”）。
+            self._sync_action_buttons()
             return
         if checked:
             self.set_selected_paths(self.selected_paths | paths)
@@ -576,8 +748,7 @@ class ActionDiffPanel(QWidget):
         return Qt.PartiallyChecked
 
     def _on_filter_changed(self, button: QPushButton) -> None:
-        self.proxy.set_status_filter(str(button.property("filterValue")))
-        self._update_visible_label()
+        self._apply_status_filter(str(button.property("filterValue")))
 
     def _on_search_changed(self, text: str) -> None:
         self.proxy.set_search_text(text)

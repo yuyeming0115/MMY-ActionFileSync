@@ -63,6 +63,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("window/splitter", self.main_splitter.saveState())
         self.settings.setValue("preview/zoom", self.preview_panel.zoom_slider.value())
         self.settings.setValue("preview/offset_y", self.preview_panel.offset_slider.value())
+        self.settings.setValue("preview/compass_visible", self.preview_panel.compass_visible)
         self.settings.sync()
         super().closeEvent(event)
 
@@ -76,6 +77,8 @@ class MainWindow(QMainWindow):
         self.main_splitter.setHandleWidth(4)
         self.preview_panel.zoom_slider.setValue(int(self.settings.value("preview/zoom", 100)))
         self.preview_panel.offset_slider.setValue(int(self.settings.value("preview/offset_y", 50)))
+        compass_visible = self.settings.value("preview/compass_visible", True)
+        self.preview_panel.set_compass_visible(str(compass_visible).lower() == "true")
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
@@ -154,6 +157,29 @@ class MainWindow(QMainWindow):
             QPushButton[directionButton="true"] { background: #2A2E33; border: 1px solid #3A3F46; border-radius: 6px; padding: 4px 12px; }
             QPushButton[directionButton="true"]:hover { border-color: #5b9bd5; }
             QPushButton[directionButton="true"]:checked { background: rgba(91,155,213,0.22); color: #5b9bd5; border-color: #5b9bd5; font-weight: 600; }
+            QPushButton[compassButton="true"] {
+                background: transparent;
+                border: none;
+                border-radius: 6px;
+                padding: 4px 14px;
+                min-height: 0;
+                color: #D4AF37;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton[compassButton="true"]:hover {
+                background: rgba(212, 175, 55, 70);
+            }
+            QPushButton[compassButton="true"]:checked {
+                background: #D4AF37;
+                border: none;
+                color: #1E2023;
+            }
+            QPushButton[compassButton="true"]:disabled {
+                color: rgba(232, 228, 217, 60);
+            }
+            QToolButton[compassToggle="true"] { padding: 3px 8px; min-height: 0; }
+            QToolButton[compassToggle="true"]:checked { color: #D4AF37; border-color: #D4AF37; }
             QLineEdit {
                 background: #2A2E33; border: 1px solid #3A3F46; border-radius: 6px; padding: 5px 8px;
                 color: #E8E4D9; min-height: 28px;

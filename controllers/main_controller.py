@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from PySide6.QtCore import QThread, QTimer
 from PySide6.QtWidgets import QDialog, QMessageBox
@@ -45,10 +45,12 @@ class MainController(MainWindow):
         self.source_target_bar.redundancy_scan_requested.connect(self.open_redundancy_scan)
         self.action_diff_panel.action_selected.connect(self.on_action_selected)
         self.action_diff_panel.selection_changed.connect(self.on_selection_changed)
+        self.action_diff_panel.jump_filter_relaxed.connect(self._on_jump_filter_relaxed)
         self.transfer_panel.transfer_requested.connect(self.show_transfer_preview)
         self.transfer_panel.cancel_requested.connect(self.cancel_transfer)
         self.transfer_panel.clear_selection_requested.connect(self.action_diff_panel.clear_selection)
         self.preview_panel.path_dropped.connect(self._on_preview_path_dropped)
+        self.preview_panel.direction_clicked.connect(self._on_compass_direction_clicked)
 
         self._restore_recent_paths()
 
@@ -239,6 +241,33 @@ class MainController(MainWindow):
         self.state.selected_relative_path = relative_path
         self.preview_panel.clear_all()
         self.load_previews(relative_path)
+        self._update_direction_context()
+
+    def _on_compass_direction_clicked(self, direction: str) -> None:
+        """预览区罗盘点击：跳转左侧清单到目标方向的同名动作，由清单联动刷新预览。"""
+        relative_path = self.state.selected_relative_path
+        if not relative_path or self._scan_in_progress or self._transfer_in_progress:
+            return
+        action_name = relative_path.rstrip("/").split("/")[-1]
+        if not self.action_diff_panel.jump_to_action(f"{direction}/{action_name}"):
+            self.transfer_panel.append_log(f"清单中未找到 {direction}/{action_name}，无法跳转。", "warning")
+
+    def _on_jump_filter_relaxed(self, relative_path: str) -> None:
+        self.transfer_panel.append_log(f"{relative_path} 被当前过滤隐藏，已自动放宽过滤并定位。", "info")
+
+    def _update_direction_context(self) -> None:
+        """把当前动作的方向上下文同步给预览区方向罗盘。"""
+        relative_path = self.state.selected_relative_path or ""
+        action_name = relative_path.rstrip("/").split("/")[-1] if relative_path else ""
+        parent = PurePosixPath(relative_path).parent.as_posix() if relative_path else "."
+        direction = "" if parent == "." else parent
+        direction_status = self.action_diff_panel.directions_for(action_name) if action_name else {}
+        self.preview_panel.set_direction_context(
+            direction,
+            action_name,
+            direction_status,
+            self.action_diff_panel.all_directions(),
+        )
 
     def on_selection_changed(self, selected_paths: set[str]) -> None:
         self.state.selected_file_paths = set(selected_paths)
