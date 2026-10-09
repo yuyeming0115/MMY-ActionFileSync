@@ -3,6 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import QByteArray, QSettings, Qt
 from PySide6.QtWidgets import QMainWindow, QSplitter, QVBoxLayout, QWidget
 
+from utils.app_info import APP_VERSION
 from views.action_diff_panel import ActionDiffPanel
 from views.preview_panel import PreviewPanel
 from views.source_target_bar import SourceTargetBar
@@ -13,7 +14,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
-        self.setWindowTitle("MMY-Tools · Action File Sync v0.2.5")
+        self.setWindowTitle(f"MMY-Tools · Action File Sync v{APP_VERSION}")
         self.resize(1440, 900)
         self.setMinimumSize(1280, 720)
 

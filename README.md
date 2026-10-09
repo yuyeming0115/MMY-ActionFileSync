@@ -72,6 +72,23 @@ python -m pip install -r requirements.txt
 .venv\Scripts\python.exe -m main
 ```
 
+## 打包发布
+
+双击或运行 `build_exe.bat` 即可完成打包。每次构建都会输出到独立目录，按“版本号_时间戳”归档，旧版本全部保留，可随时找回：
+
+```text
+releases/
+├─ v0.2.5_20260929_104213/
+│  ├─ MMY-ActionFileSync.exe
+│  └─ build_info.txt          版本号、构建时间、git 提交号
+├─ v0.2.5_20260928_175306/
+└─ ...
+```
+
+- 版本号的单一来源是 `utils/app_info.py` 的 `APP_VERSION`（窗口标题同步显示）；发新版只需改这一处，目录名和界面版本号会一起更新。
+- 构建时间戳精确到秒，同一版本重复打包也不会互相覆盖。
+- `build_info.txt` 记录该次构建对应的 git 提交，方便日后辨认旧版本。
+
 ## 测试
 
 自动化单元测试（含不依赖 Qt 的模型/传输测试与 Qt 界面冒烟测试）：
