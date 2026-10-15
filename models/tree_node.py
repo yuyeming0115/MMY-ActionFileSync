@@ -26,7 +26,7 @@ class TreeNode:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def is_previewable(self) -> bool:
-        return (self.node_type == "sequence" or self.node_type == "image") and bool(self.absolute_path)
+        return (self.node_type in {"sequence", "image", "atlas"}) and bool(self.absolute_path)
 
     @property
     def path_obj(self) -> Path | None:

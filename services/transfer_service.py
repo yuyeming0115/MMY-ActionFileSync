@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from models.transfer_job import TransferItem, TransferJob
+from services.atlas_scan_service import ATLAS_PNG, ATLAS_PLIST
 from utils.file_utils import iter_files_recursively
 from utils.hash_utils import hash_file
 
@@ -19,10 +20,16 @@ class PathEscapeError(ValueError):
 
 class TransferService:
     def build_job_for_files(self, left_root: str, right_root: str, relative_paths: list[str]) -> TransferJob:
+        """按相对路径构建传输任务。
+
+        图集条目强制「png + plist 成对传输」：只要勾选了其中任一文件，
+        就把同名的另一个也一并纳入，避免目标端出现「有图无布局」或
+        「有布局无图」的破损状态（客户端会直接渲染错乱）。
+        """
         items: list[TransferItem] = []
         left = self._resolve_root(left_root)
         right = self._resolve_root(right_root)
-        for relative_path in sorted(set(relative_paths)):
+        for relative_path in sorted(self._expand_atlas_pairs(left, relative_paths)):
             source = self._safe_join(left, relative_path)
             target = self._safe_join(right, relative_path)
             if source is None or target is None:
@@ -37,6 +44,28 @@ class TransferService:
                 )
             )
         return TransferJob(items=items)
+
+    @staticmethod
+    def _expand_atlas_pairs(left_root: Path, relative_paths: list[str]) -> set[str]:
+        """把勾选的图集文件补全为成对集合。"""
+        expanded: set[str] = set(relative_paths)
+        for relative_path in relative_paths:
+            name = Path(relative_path).name
+            lower = name.lower()
+            if lower.endswith(ATLAS_PNG):
+                stem = name[: -len(ATLAS_PNG)]
+            elif lower.endswith(ATLAS_PLIST):
+                stem = name[: -len(ATLAS_PLIST)]
+            else:
+                continue
+            png_name = f"{stem}{ATLAS_PNG}"
+            plist_name = f"{stem}{ATLAS_PLIST}"
+            # 只有当同名 png+plist 都存在于来源时才算图集条目，才做补全
+            if not ((left_root / png_name).is_file() and (left_root / plist_name).is_file()):
+                continue
+            expanded.add((Path(relative_path).parent / plist_name).as_posix())
+            expanded.add((Path(relative_path).parent / png_name).as_posix())
+        return expanded
 
     def build_job_for_node(self, left_root: str, right_root: str, relative_paths: list[str]) -> TransferJob:
         items: list[TransferItem] = []

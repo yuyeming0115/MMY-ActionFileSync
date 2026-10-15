@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from PySide6.QtCore import QPoint, QRect, QSize, QSortFilterProxyModel, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut, QStandardItem, QStandardItemModel
@@ -47,6 +47,10 @@ STATUS_FOREGROUND = {
 }
 
 ACTION_HIGHLIGHT_STATUSES = ("only_left", "different")
+
+# 动作快捷按钮数量上限。图集条目的 action_name 是完整文件名，
+# 若不限制会按文件名去重出几千个按钮，导致界面卡死。
+_MAX_ACTION_BUTTONS = 24
 
 
 class ActionFilterProxyModel(QSortFilterProxyModel):
@@ -427,6 +431,16 @@ class ActionDiffPanel(QWidget):
 
     @staticmethod
     def _direction_of(action: ActionDiffItem) -> str:
+        """取动作所属方向。
+
+        传统序列帧动作取父目录名；图集条目的方向藏在文件名里，
+        由扫描器解析后放在 ``source_node.extra['direction']``。
+        """
+        node = action.source_node or action.target_node
+        extra = getattr(node, "extra", None) or {}
+        direction = str(extra.get("direction") or "")
+        if direction:
+            return direction
         parent = PurePosixPath(action.relative_path).parent.as_posix()
         return "" if parent == "." else parent
 
@@ -464,13 +478,25 @@ class ActionDiffPanel(QWidget):
         self.direction_buttons_row.sync_height()
 
     def _sync_direction_buttons(self) -> None:
-        """根据当前选中状态刷新各方向按钮的 checked 态。"""
+        """根据当前选中状态刷新各方向按钮的 checked 态（单次遍历）。"""
+        totals: dict[str, int] = {}
+        selected: dict[str, int] = {}
+        for action in self.actions:
+            direction = self._direction_of(action)
+            if not direction:
+                continue
+            totals[direction] = totals.get(direction, 0) + action.transfer_file_count
+            selected[direction] = selected.get(direction, 0) + sum(
+                1 for item in action.transferable_files if item.relative_path in self.selected_paths
+            )
         for index in range(self.direction_buttons_layout.count()):
             button = self.direction_buttons_layout.itemAt(index).widget()
             if not isinstance(button, QPushButton):
                 continue
-            paths = self._direction_button_paths(button.text())
-            button.setChecked(bool(paths) and paths.issubset(self.selected_paths))
+            direction = button.text()
+            total = totals.get(direction, 0)
+            picked = selected.get(direction, 0)
+            button.setChecked(total > 0 and picked >= total)
 
     def _on_direction_button_toggled(self, direction: str, checked: bool) -> None:
         """点击方向按钮：勾选/取消该方向下所有动作的可传输文件。"""
@@ -489,9 +515,19 @@ class ActionDiffPanel(QWidget):
         """收集所有同名动作的可传输文件相对路径。"""
         paths: set[str] = set()
         for action in self.actions:
-            if action.action_name == name:
+            if self._action_label(action) == name:
                 paths.update(item.relative_path for item in action.transferable_files)
         return paths
+
+    def _action_label(self, action: ActionDiffItem) -> str:
+        """动作按钮的显示名：优先用图集解析出的动作名，避免按钮爆炸。"""
+        node = action.source_node or action.target_node
+        extra = getattr(node, "extra", None) or {}
+        label = str(extra.get("action") or "")
+        if label:
+            return label
+        # 非图集条目退回原文件名/目录名
+        return action.action_name
 
     def _rebuild_action_buttons(self) -> None:
         """根据当前动作清单重建顶部动作快捷按钮（按首次出现顺序去重）。"""
@@ -504,9 +540,14 @@ class ActionDiffPanel(QWidget):
                 widget.deleteLater()
         seen: list[str] = []
         for action in self.actions:
-            name = action.action_name
+            # 图集条目的 action_name 是完整文件名，直接用作按钮名会生成
+            # 几千个按钮（实测 8.8 秒 + 界面卡死）。改用解析出的动作名
+            # （idle / ride_run / attack…），数量恒定在个位数。
+            name = self._action_label(action)
             if name and name not in seen:
                 seen.append(name)
+                if len(seen) >= _MAX_ACTION_BUTTONS:
+                    break
         for name in seen:
             button = QPushButton(name)
             button.setCheckable(True)
@@ -520,13 +561,29 @@ class ActionDiffPanel(QWidget):
         self.action_buttons_row.sync_height()
 
     def _sync_action_buttons(self) -> None:
-        """根据当前选中状态刷新各动作按钮的 checked 态。"""
+        """根据当前选中状态刷新各动作按钮的 checked 态。
+
+        一次遍历算完所有按钮状态。早期实现是「每个按钮都遍历全部动作」，
+        条目上千时退化成 O(n²)（6913 条实测数秒级卡顿）。
+        """
+        totals: dict[str, int] = {}
+        selected: dict[str, int] = {}
+        for action in self.actions:
+            label = self._action_label(action)
+            if not label:
+                continue
+            total = action.transfer_file_count
+            picked = sum(1 for item in action.transferable_files if item.relative_path in self.selected_paths)
+            totals[label] = totals.get(label, 0) + total
+            selected[label] = selected.get(label, 0) + picked
         for index in range(self.action_buttons_layout.count()):
             button = self.action_buttons_layout.itemAt(index).widget()
             if not isinstance(button, QPushButton):
                 continue
-            paths = self._action_button_paths(button.text())
-            button.setChecked(bool(paths) and paths.issubset(self.selected_paths))
+            label = button.text()
+            total = totals.get(label, 0)
+            picked = selected.get(label, 0)
+            button.setChecked(total > 0 and picked >= total)
 
     def _on_action_button_toggled(self, name: str, checked: bool) -> None:
         """点击动作按钮：勾选/取消该动作在所有方向下的可传输文件。"""
@@ -599,7 +656,15 @@ class ActionDiffPanel(QWidget):
         selection_item.setData("action", ROLE_KIND)
         selection_item.setData(action, ROLE_OBJECT)
         selection_item.setData(action.status, ROLE_STATUS)
-        selection_item.setData(f"{action.action_name} {action.relative_path}", ROLE_SEARCH)
+        atlas_node = action.source_node or action.target_node
+        atlas_extra = getattr(atlas_node, "extra", None) or {}
+        # 图集条目额外把角色ID/部件/方向/动作纳入搜索，便于「按角色筛」
+        search_text = (
+            str(atlas_extra["search_text"])
+            if atlas_extra.get("layout") == "atlas" and atlas_extra.get("search_text")
+            else f"{action.action_name} {action.relative_path}"
+        )
+        selection_item.setData(search_text, ROLE_SEARCH)
         selection_item.setData(action.transfer_file_count > 0, ROLE_TRANSFERABLE)
         if action.transfer_file_count:
             selection_item.setCheckable(True)
@@ -623,7 +688,11 @@ class ActionDiffPanel(QWidget):
 
         direction_item = QStandardItem(self._direction_prefix(action))
         direction_item.setTextAlignment(Qt.AlignCenter)
-        group_text, action_text = self._split_action_path(action.relative_path)
+        atlas_columns = self._atlas_columns(action)
+        if atlas_columns:
+            group_text, action_text = atlas_columns
+        else:
+            group_text, action_text = self._split_action_path(action.relative_path)
         group_item = QStandardItem(group_text)
         group_item.setToolTip(action.relative_path)
         action_item = QStandardItem(action_text)
@@ -822,6 +891,23 @@ class ActionDiffPanel(QWidget):
 
     @staticmethod
     def _split_action_path(relative_path: str) -> tuple[str, str]:
+        """拆出清单的「目录」「动作」两列。
+
+        传统序列帧：目录 = 父目录名，动作 = 目录名。
+        图集条目：目录 = 「角色ID/部件」（无部件时只显示角色ID），
+        动作 = 动作名（idle / ride_run 等）；未解析出动作时退回文件名。
+        """
         path = PurePosixPath(relative_path)
         parent = path.parent.as_posix()
         return ("—" if parent == "." else parent, path.name)
+
+    @staticmethod
+    def _atlas_columns(action: ActionDiffItem) -> tuple[str, str] | None:
+        """图集条目的（目录列, 动作列）；非图集条目返回 None。"""
+        node = action.source_node or action.target_node
+        extra = getattr(node, "extra", None) or {}
+        if not extra.get("layout") == "atlas":
+            return None
+        group = str(extra.get("group_label") or "—")
+        action_name = str(extra.get("action") or "") or Path(action.relative_path).name
+        return (group, action_name)

@@ -43,12 +43,17 @@ class CompareService:
             return "unknown"
         if left.node_type != right.node_type:
             return "different"
-        if left.node_type == "sequence":
+        # 图集条目：帧集合（png/plist 文件对）不同即视为内容变更
+        if left.node_type in {"sequence", "atlas"}:
             # 帧文件集合使用 casefold 比较，避免大小写差异误判
             left_frames = {name.casefold() for name in left.frame_files}
             right_frames = {name.casefold() for name in right.frame_files}
             if len(left.frame_files) != len(right.frame_files) or left_frames != right_frames:
                 return "different"
         if left.digest != right.digest:
+            return "different"
+        # 摘要一致但「同名文件实际字节数不同」的情况不可能出现
+        # （摘要已含字节数），此处仅兜底防御
+        if left.file_size_bytes != right.file_size_bytes:
             return "different"
         return "same"
