@@ -382,6 +382,60 @@ class UiWorkflowTests(unittest.TestCase):
         self.assertEqual(panel.proxy.rowCount(), 2)
         self._dispose(panel)
 
+    def test_identical_actions_stay_visible_and_select_first(self) -> None:
+        """两侧目录相同（全部「已一致」）时清单不能空，否则预览区没动作可选。"""
+        actions = [
+            self._make_direction_action("SE", "idle", "same"),
+            self._make_direction_action("N", "block", "same"),
+        ]
+        panel = ActionDiffPanel()
+        received: list[str] = []
+        panel.action_selected.connect(received.append)
+        panel.populate(actions)
+
+        self.assertEqual(panel.proxy.rowCount(), 2)
+        self.assertEqual(panel.proxy.status_filter, "all")
+        self.assertTrue(panel.filter_buttons["all"].isChecked())
+        self.assertEqual(received, ["SE/idle"])
+        self.assertTrue(panel._auto_relaxed)
+        self._dispose(panel)
+
+    def test_auto_relaxed_filter_restores_transfer_when_changes_appear(self) -> None:
+        """自动放宽只是兜底：重新扫描出现待更新时切回「待更新」过滤。"""
+        panel = ActionDiffPanel()
+        panel.populate([self._make_direction_action("SE", "idle", "same")])
+        self.assertEqual(panel.proxy.status_filter, "all")
+
+        panel.populate(
+            [
+                self._make_direction_action("SE", "idle", "different"),
+                self._make_direction_action("N", "block", "same"),
+            ]
+        )
+
+        self.assertEqual(panel.proxy.status_filter, "transfer")
+        self.assertEqual(panel.proxy.rowCount(), 1)
+        self.assertFalse(panel._auto_relaxed)
+        self._dispose(panel)
+
+    def test_rescan_keeps_current_action_selected(self) -> None:
+        """刷新后停在原动作上，预览才会跟着重新加载，而不是悄悄跳回第一行。"""
+        actions = [
+            self._make_direction_action("SE", "idle", "different"),
+            self._make_direction_action("N", "block", "different"),
+        ]
+        panel = ActionDiffPanel()
+        received: list[str] = []
+        panel.action_selected.connect(received.append)
+        panel.populate(actions)
+        panel.view.setCurrentIndex(panel.proxy.index(1, 0))
+        self.assertEqual(received[-1], "N/block")
+
+        received.clear()
+        panel.populate(actions)
+        self.assertEqual(received, ["N/block"])
+        self._dispose(panel)
+
     def test_direction_and_action_buttons_unstick_when_nothing_transferable(self) -> None:
         actions = [
             self._make_direction_action("SE", "idle", "same"),
@@ -756,6 +810,82 @@ class UiWorkflowTests(unittest.TestCase):
             self.assertFalse(controller.state.selected_file_paths)
             self._wait_threads_released(controller)
             controller.clear_all_lists()
+            controller.settings.clear()
+            controller.settings.sync()
+            self._dispose(controller)
+
+    def test_same_directory_scan_previews_animation(self) -> None:
+        """左右拖入同一目录：清单照常列出动作，两侧预览都要出动画帧。"""
+        settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        settings.clear()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "hero"
+            idle = root / "SE" / "idle"
+            idle.mkdir(parents=True)
+            for index in (1, 2, 3):
+                Image.new("RGB", (16, 16), "red").save(idle / f"idle_{index:03d}.png")
+
+            controller = MainController()
+            controller.on_paths_changed(str(root), str(root))
+            self._wait_until(lambda: not controller._scan_in_progress, timeout=10.0)
+
+            self.assertEqual([item.action_name for item in controller.state.action_items], ["idle"])
+            self.assertIn("同一目录", controller.source_target_bar.status_label.text())
+            self.assertEqual(controller.action_diff_panel.proxy.rowCount(), 1)
+            self.assertEqual(controller.action_diff_panel.proxy.status_filter, "all")
+
+            preview_panel = controller.preview_panel
+            self._wait_until(
+                lambda: (
+                    preview_panel.left_preview.frame_count == 3
+                    and preview_panel.right_preview.frame_count == 3
+                ),
+                timeout=8.0,
+            )
+            self.assertEqual(preview_panel.left_preview.action_label.text(), "SE · idle")
+            self.assertEqual(preview_panel.frame_slider.maximum() + 1, 3)
+
+            # 再点一次「刷新对比」：依然有清单和动画，不会变成空白
+            controller.source_target_bar.refresh_button.click()
+            self._wait_until(lambda: not controller._scan_in_progress, timeout=10.0)
+            self._wait_until(
+                lambda: preview_panel.left_preview.frame_count == 3,
+                timeout=8.0,
+            )
+            self.assertEqual(controller.action_diff_panel.proxy.rowCount(), 1)
+
+            self._wait_threads_released(controller)
+            controller.settings.clear()
+            controller.settings.sync()
+            self._dispose(controller)
+
+    def test_refresh_requested_during_scan_runs_afterwards(self) -> None:
+        """扫描进行中再次请求刷新：结束后必须补跑，避免界面停在旧结果。"""
+        settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        settings.clear()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            first = base / "first"
+            second = base / "second"
+            for root, action in ((first, "idle"), (second, "attack")):
+                target = root / "NW" / action
+                target.mkdir(parents=True)
+                Image.new("RGB", (8, 8), "red").save(target / f"{action}_001.png")
+
+            controller = MainController()
+            controller.on_paths_changed(str(first), str(second))
+            # 扫描尚未结束就换成新目录：这次请求被记为 pending
+            controller.on_paths_changed(str(second), str(second))
+            self.assertTrue(controller._pending_refresh)
+            self._wait_until(
+                lambda: [item.action_name for item in controller.state.action_items] == ["attack"],
+                timeout=10.0,
+            )
+            self._wait_until(lambda: not controller._scan_in_progress, timeout=10.0)
+            self._wait_threads_released(controller)
+
+            self.assertEqual([item.action_name for item in controller.state.action_items], ["attack"])
+            self.assertIn("同一目录", controller.source_target_bar.status_label.text())
             controller.settings.clear()
             controller.settings.sync()
             self._dispose(controller)

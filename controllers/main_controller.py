@@ -35,6 +35,7 @@ class MainController(MainWindow):
         self._skipped = 0
         self._scan_in_progress = False
         self._transfer_in_progress = False
+        self._pending_refresh = False
         self._scan_cancel_token: CancellationToken | None = None
         self._transfer_cancel_token: CancellationToken | None = None
 
@@ -180,7 +181,11 @@ class MainController(MainWindow):
             self.source_target_bar.set_scan_status("请选择来源和目标目录", "idle")
             return
         if self._scan_in_progress or self._transfer_in_progress:
+            # 扫描/传输进行中：记下这次请求，等当前任务结束后自动补一次扫描，
+            # 避免「点了刷新没反应」以及拖入新目录后仍显示旧结果。
+            self._pending_refresh = True
             return
+        self._pending_refresh = False
         self._scan_in_progress = True
         self._scan_cancel_token = CancellationToken()
         self.source_target_bar.set_scan_status("正在扫描并对比目录…", "busy")
@@ -213,15 +218,47 @@ class MainController(MainWindow):
         }
         self.state.selected_file_paths.intersection_update(eligible)
         self.action_diff_panel.populate(self.state.action_items, self.state.selected_file_paths)
+        action_count = len(self.state.action_items)
         update_count = sum(action.transfer_file_count > 0 for action in self.state.action_items)
         file_count = sum(action.transfer_file_count for action in self.state.action_items)
-        self.source_target_bar.set_scan_status(
-            f"扫描完成 · {update_count} 个动作待更新 · {file_count} 个文件",
-            "ready",
-        )
+        if not action_count:
+            # 没有任何动作可展示，清掉残留预览，避免误以为是当前目录的动画
+            self.state.selected_relative_path = ""
+            self.preview_panel.clear_all()
+            self.source_target_bar.set_scan_status("未识别到动作序列目录", "error")
+            self.transfer_panel.append_log(
+                "扫描完成，但未在目录中识别到动作序列（请确认拖入的是资源目录而非其上级目录）。",
+                "warning",
+            )
+        elif self._is_same_directory():
+            # 两侧同一目录：没有可传输文件，仅用于预览比对
+            self.source_target_bar.set_scan_status(
+                f"两侧为同一目录 · 仅预览 · 共 {action_count} 个动作",
+                "ready",
+            )
+            self.transfer_panel.append_log(
+                f"刷新完成：两侧为同一目录，仅用于预览对比，共 {action_count} 个动作。",
+                "info",
+            )
+        else:
+            self.source_target_bar.set_scan_status(
+                f"扫描完成 · 共 {action_count} 个动作 · {update_count} 个待更新 · {file_count} 个文件",
+                "ready",
+            )
+            self.transfer_panel.append_log(
+                f"刷新完成：共 {action_count} 个动作，{update_count} 个待更新，{file_count} 个文件。",
+                "success" if file_count else "info",
+            )
         self.source_target_bar.set_busy(False)
         self.action_diff_panel.set_controls_enabled(True)
         self.transfer_panel.set_transfer_enabled(True)
+        self._run_pending_refresh()
+
+    def _is_same_directory(self) -> bool:
+        """来源与目标是否为同一个目录（仅预览场景）。"""
+        left = normalize_path(self.state.left_root_path or "")
+        right = normalize_path(self.state.right_root_path or "")
+        return bool(left) and left.casefold() == right.casefold()
 
     def _on_worker_failed(self, message: str) -> None:
         self._scan_in_progress = False
@@ -236,6 +273,14 @@ class MainController(MainWindow):
             self.source_target_bar.set_scan_status("扫描失败", "error")
             self.transfer_panel.append_log(message, "error")
             QMessageBox.critical(self, "扫描失败", message)
+        self._run_pending_refresh()
+
+    def _run_pending_refresh(self) -> None:
+        """当前任务结束后补跑一次被吞掉的刷新请求。"""
+        if not self._pending_refresh:
+            return
+        self._pending_refresh = False
+        QTimer.singleShot(0, self.refresh_compare)
 
     def on_action_selected(self, relative_path: str) -> None:
         self.state.selected_relative_path = relative_path
@@ -428,6 +473,7 @@ class MainController(MainWindow):
     def clear_all_lists(self) -> None:
         if self._scan_in_progress or self._transfer_in_progress:
             return
+        self._pending_refresh = False
         self.state = AppState()
         self.source_target_bar.set_paths("", "")
         self.source_target_bar.set_scan_status("请选择来源和目标目录", "idle")

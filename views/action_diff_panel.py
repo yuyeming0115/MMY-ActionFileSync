@@ -220,6 +220,10 @@ class ActionDiffPanel(QWidget):
         self.actions: list[ActionDiffItem] = []
         self.selected_paths: set[str] = set()
         self._updating_checks = False
+        # 当前高亮（预览中）的动作路径，重新扫描后用于保持选中行不跳回第一行
+        self._current_action_path = ""
+        # 本次是否因「待更新为空」自动放宽到了「全部」过滤
+        self._auto_relaxed = False
         self.filter_buttons: dict[str, QPushButton] = {}
 
         layout = QVBoxLayout(self)
@@ -321,6 +325,7 @@ class ActionDiffPanel(QWidget):
         self.toggle_selection_shortcut.activated.connect(self.toggle_highlighted)
 
     def populate(self, actions: list[ActionDiffItem], selected_paths: set[str] | None = None) -> None:
+        previous_path = self._current_action_path
         self.actions = actions
         eligible = {
             item.relative_path
@@ -335,13 +340,14 @@ class ActionDiffPanel(QWidget):
                 self.model.appendRow(self._build_action_row(action))
         finally:
             self._updating_checks = False
+        # 上一次是「无待更新」自动放宽到「全部」的，本次一旦出现待更新就切回默认过滤
+        if self._auto_relaxed and any(action.transfer_file_count for action in actions):
+            self._apply_status_filter("transfer")
         self.proxy.refresh_filter()
+        self._relax_filter_when_empty()
         self._update_filter_counts()
         self._update_visible_label()
-        if self.proxy.rowCount() > 0:
-            index = self.proxy.index(0, 0)
-            self.view.setCurrentIndex(index)
-            self._emit_action(index)
+        self._restore_current(previous_path)
         self._rebuild_direction_buttons()
         self._rebuild_action_buttons()
         self._emit_selection()
@@ -349,12 +355,63 @@ class ActionDiffPanel(QWidget):
     def reset(self) -> None:
         self.actions = []
         self.selected_paths.clear()
+        self._current_action_path = ""
+        self._auto_relaxed = False
         self.model.removeRows(0, self.model.rowCount())
         self.search_edit.clear()
         self.visible_label.setText("尚未扫描")
         self._rebuild_direction_buttons()
         self._rebuild_action_buttons()
         self._emit_selection()
+
+    def _relax_filter_when_empty(self) -> None:
+        """「待更新」为空但存在动作时，自动放宽到「全部」。
+
+        两侧目录相同（或内容完全一致）时所有动作都是「已一致」，默认的
+        「待更新」过滤会把清单清成 0 行 —— 没有行就没有当前动作，预览区
+        自然看不到任何动画序列。这里只在「有动作却一行都看不见」时兜底
+        放宽一次，并把过滤按钮同步为「全部」，用户仍可手动切回。
+        """
+        self._auto_relaxed = False
+        if not self.actions:
+            return
+        if not self.proxy.rowCount() and self.proxy.status_filter != "all":
+            self._apply_status_filter("all")
+        # 只要处于「全部」且一个待更新动作都没有，就保留提示（刷新后依然成立）
+        self._auto_relaxed = (
+            self.proxy.status_filter == "all"
+            and self.proxy.rowCount() > 0
+            and not any(action.transfer_file_count for action in self.actions)
+        )
+
+    def _restore_current(self, previous_path: str) -> None:
+        """重新扫描后尽量停在原动作上（保证预览跟着刷新），否则退回第一行。"""
+        index = None
+        if previous_path:
+            row = next(
+                (
+                    position
+                    for position, action in enumerate(self.actions)
+                    if action.relative_path.casefold() == previous_path.casefold()
+                ),
+                None,
+            )
+            if row is not None:
+                mapped = self.proxy.mapFromSource(self.model.index(row, 0))
+                if mapped.isValid():
+                    index = mapped
+        if index is None:
+            if not self.proxy.rowCount():
+                return
+            index = self.proxy.index(0, 0)
+        selection = self.view.selectionModel()
+        selection.blockSignals(True)
+        try:
+            self.view.setCurrentIndex(index)
+        finally:
+            selection.blockSignals(False)
+        # 同一次扫描内 currentChanged 已被屏蔽，这里显式触发一次预览联动
+        self._emit_action(index)
 
     def set_selected_paths(self, paths: set[str]) -> None:
         eligible = {
@@ -417,6 +474,7 @@ class ActionDiffPanel(QWidget):
 
     def _apply_status_filter(self, value: str) -> None:
         """以编程方式切换状态过滤，并同步过滤按钮的选中态。"""
+        self._auto_relaxed = False
         button = self.filter_buttons.get(value)
         if button is not None:
             button.setChecked(True)
@@ -824,7 +882,10 @@ class ActionDiffPanel(QWidget):
         self._update_visible_label()
 
     def _update_visible_label(self) -> None:
-        self.visible_label.setText(f"{self.proxy.rowCount()} 个可见动作")
+        text = f"{self.proxy.rowCount()} 个可见动作"
+        if self._auto_relaxed:
+            text = f"{text}（无待更新，已显示全部）"
+        self.visible_label.setText(text)
 
     def _update_filter_counts(self) -> None:
         counts = {
@@ -854,6 +915,7 @@ class ActionDiffPanel(QWidget):
             source_index = source_index.parent()
         action = source_index.data(ROLE_OBJECT)
         if isinstance(action, ActionDiffItem):
+            self._current_action_path = action.relative_path
             self.action_selected.emit(action.relative_path)
 
     def _emit_selection(self) -> None:
