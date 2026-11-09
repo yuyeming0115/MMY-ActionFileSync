@@ -181,6 +181,90 @@ class MainWindow(QMainWindow):
             }
             QToolButton[compassToggle="true"] { padding: 3px 8px; min-height: 0; }
             QToolButton[compassToggle="true"]:checked { color: #D4AF37; border-color: #D4AF37; }
+            QFrame[pinnedBar="true"] {
+                background: #231e19;
+                border: 1px solid #4d3726;
+                border-radius: 6px;
+            }
+            QScrollArea#buttonRowArea, QWidget#buttonRowViewport, QWidget#buttonRowContent {
+                background: transparent;
+            }
+            QLabel[pinnedBarTitle="true"] {
+                color: #e08a3c;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QLabel[pinnedEmptyHint="true"] {
+                color: #96A1AD;
+                font-size: 12px;
+            }
+            QToolButton[pinToggle="true"] {
+                background: transparent;
+                border: 1px solid #4d3726;
+                border-radius: 6px;
+                padding: 4px;
+                min-width: 28px;
+                min-height: 28px;
+            }
+            QToolButton[pinToggle="true"]:hover {
+                border-color: #e08a3c;
+                background: rgba(224, 138, 60, 0.12);
+            }
+            QToolButton[pinToggle="true"]:checked {
+                background: rgba(224, 138, 60, 0.25);
+                color: #f0a860;
+                border-color: #e08a3c;
+            }
+            QToolButton[pinToggle="true"]:disabled {
+                background: transparent;
+                color: #5A6068;
+                border-color: #3A3F46;
+            }
+            QPushButton[pinnedDirButton="true"] {
+                background: #2A2E33;
+                border: 1px solid #4A3E33;
+                border-radius: 5px;
+                padding: 2px 10px;
+                min-height: 20px;
+                font-size: 12px;
+                color: #E8E4D9;
+            }
+            QPushButton[pinnedDirButton="true"]:hover {
+                border-color: #e08a3c;
+                color: #ffffff;
+            }
+            QPushButton[pinnedDirButton="true"]:checked {
+                background: rgba(224, 138, 60, 0.25);
+                color: #f0a860;
+                border-color: #e08a3c;
+                font-weight: 600;
+            }
+            QPushButton[pinnedDirButton="true"]:disabled {
+                background: #2A2E33;
+                color: #5A6068;
+                border-color: #3A3F46;
+            }
+            QPushButton[pinnedAddButton="true"] {
+                background: #2A2E33;
+                border: 1px dashed #5A524A;
+                border-radius: 5px;
+                padding: 2px 9px;
+                min-width: 24px;
+                min-height: 20px;
+                font-size: 12px;
+                font-weight: 600;
+                color: #96A1AD;
+            }
+            QPushButton[pinnedAddButton="true"]:hover {
+                border-color: #e08a3c;
+                color: #f0a860;
+                background: rgba(224, 138, 60, 0.12);
+            }
+            QPushButton[pinnedAddButton="true"]:disabled {
+                background: #2A2E33;
+                color: #5A6068;
+                border-color: #3A3F46;
+            }
             QLineEdit {
                 background: #2A2E33; border: 1px solid #3A3F46; border-radius: 6px; padding: 5px 8px;
                 color: #E8E4D9; min-height: 28px;

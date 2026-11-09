@@ -195,7 +195,7 @@ class SinglePreviewWidget(QWidget):
 
         self.canvas = PreviewCanvas()
         self.canvas.setAlignment(Qt.AlignCenter)
-        self.canvas.setMinimumHeight(360)
+        self.canvas.setMinimumHeight(300)
         self.canvas.setWordWrap(True)
         self.canvas.setProperty("previewCanvas", True)
         self.canvas.resized.connect(self._render_current_frame)
@@ -389,7 +389,7 @@ class BlinkPreviewWidget(QWidget):
         self.title_label.setProperty("previewRole", "source")
         self.canvas = PreviewCanvas()
         self.canvas.setAlignment(Qt.AlignCenter)
-        self.canvas.setMinimumHeight(420)
+        self.canvas.setMinimumHeight(300)
         self.canvas.setProperty("previewCanvas", True)
         self.canvas.resized.connect(self._render)
         self.meta_label = QLabel("差异闪烁模式")

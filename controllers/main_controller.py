@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 
 from PySide6.QtCore import QThread, QTimer
-from PySide6.QtWidgets import QDialog, QMessageBox
+from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 from models.app_state import AppState
 from models.preview_item import PreviewItem
@@ -12,6 +12,14 @@ from services.transfer_service import TransferService
 from utils.cancel_token import CancellationToken
 from utils.hash_utils import HashCache
 from utils.path_matcher import find_same_name_folder, normalize_path
+from utils.pinned_paths import (
+    add_pinned_path,
+    contains_pinned_path,
+    load_pinned_paths,
+    move_pinned_path,
+    remove_pinned_path,
+    serialize_pinned_paths,
+)
 from views.main_window import MainWindow
 from views.redundancy_dialog import RedundancyDialog
 from views.transfer_preview_dialog import TransferPreviewDialog
@@ -38,12 +46,18 @@ class MainController(MainWindow):
         self._pending_refresh = False
         self._scan_cancel_token: CancellationToken | None = None
         self._transfer_cancel_token: CancellationToken | None = None
+        self._pinned_targets: list[str] = []
 
         self.source_target_bar.path_changed.connect(self.on_paths_changed)
         self.source_target_bar.refresh_requested.connect(self.refresh_compare)
         self.source_target_bar.cancel_requested.connect(self.cancel_scan)
         self.source_target_bar.clear_requested.connect(self.clear_all_lists)
         self.source_target_bar.redundancy_scan_requested.connect(self.open_redundancy_scan)
+        self.source_target_bar.pinned_target_selected.connect(self.switch_to_pinned_target)
+        self.source_target_bar.pin_current_target_requested.connect(self.toggle_pin_current_target)
+        self.source_target_bar.add_pinned_target_requested.connect(self.add_pinned_target)
+        self.source_target_bar.unpin_target_requested.connect(self.unpin_target_path)
+        self.source_target_bar.move_pinned_target_requested.connect(self.move_pinned_target)
         self.action_diff_panel.action_selected.connect(self.on_action_selected)
         self.action_diff_panel.selection_changed.connect(self.on_selection_changed)
         self.action_diff_panel.jump_filter_relaxed.connect(self._on_jump_filter_relaxed)
@@ -98,7 +112,7 @@ class MainController(MainWindow):
         self.settings.setValue("paths/source", source_path)
         self.settings.setValue("paths/target", final_target)
         self.settings.sync()
-        if final_target != target_path:
+        if self.source_target_bar.paths() != (source_path, final_target):
             self.source_target_bar.set_paths(source_path, final_target)
         self.source_target_bar.refresh_button.setEnabled(bool(source_path and final_target))
         self._append_recent("source", source_path)
@@ -167,6 +181,99 @@ class MainController(MainWindow):
             self.settings.value("paths/recent_source", []) or [],
             self.settings.value("paths/recent_target", []) or [],
         )
+
+    def switch_to_pinned_target(self, path: str) -> None:
+        """一键切换右侧目标目录到已固定的常用目录。"""
+        if self._scan_in_progress or self._transfer_in_progress:
+            return
+        normalized = normalize_path(path.strip())
+        if not normalized:
+            return
+        if not Path(normalized).is_dir():
+            self.transfer_panel.append_log(f"右侧常用目录不存在: {normalized}", "warning")
+            reply = QMessageBox.question(
+                self,
+                "常用目录不存在",
+                f"右侧常用目录不存在或暂不可访问：\n{normalized}\n\n是否将其从右侧常用目录中取消固定？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self.unpin_target_path(normalized)
+            else:
+                self.source_target_bar.sync_pinned_state()
+            return
+        current_source = self.state.left_root_path or ""
+        current_target = self.state.right_root_path or ""
+        if current_target and normalize_path(current_target).casefold() == normalized.casefold():
+            self.source_target_bar.sync_pinned_state()
+            if current_source and self.state.compare_result is None:
+                self.refresh_compare()
+            return
+        self.source_target_bar.set_paths(current_source, normalized)
+        self.transfer_panel.append_log(f"已切换右侧目标目录: {normalized}", "info")
+        self.on_paths_changed(current_source, normalized)
+        if not current_source:
+            self.source_target_bar.set_scan_status("已切换右侧目录，请选择来源目录", "idle")
+
+    def toggle_pin_current_target(self) -> None:
+        """钉住或取消固定当前右侧目录。"""
+        current = normalize_path(self.source_target_bar.target_field.path().strip())
+        if not current:
+            return
+        if contains_pinned_path(self._pinned_targets, current):
+            self.unpin_target_path(current)
+        else:
+            self.pin_target_path(current)
+
+    def add_pinned_target(self) -> None:
+        """通过目录选择器添加并固定右侧常用目录。"""
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "选择要固定的右侧常用目录",
+            self.state.right_root_path or "",
+        )
+        if path:
+            self.pin_target_path(path)
+
+    def pin_target_path(self, path: str) -> None:
+        """固定指定路径到右侧常用目录。"""
+        normalized = normalize_path(path.strip())
+        if not normalized:
+            return
+        updated, changed = add_pinned_path(self._pinned_targets, normalized)
+        if not changed:
+            self.source_target_bar.sync_pinned_state()
+            self.transfer_panel.append_log(f"该目录已在右侧常用目录中: {normalized}", "info")
+            return
+        self._pinned_targets = updated
+        self._save_pinned_targets()
+        self.source_target_bar.set_pinned_targets(self._pinned_targets)
+        self.transfer_panel.append_log(f"已固定右侧常用目录: {normalized}", "info")
+
+    def unpin_target_path(self, path: str) -> None:
+        """取消固定指定右侧常用目录。"""
+        normalized = normalize_path(path.strip())
+        updated, changed = remove_pinned_path(self._pinned_targets, normalized)
+        if not changed:
+            return
+        self._pinned_targets = updated
+        self._save_pinned_targets()
+        self.source_target_bar.set_pinned_targets(self._pinned_targets)
+        self.transfer_panel.append_log(f"已取消固定右侧常用目录: {normalized}", "info")
+
+    def move_pinned_target(self, path: str, delta: int) -> None:
+        """左右调整右侧常用目录的排序位置。"""
+        updated, changed = move_pinned_path(self._pinned_targets, path, delta)
+        if not changed:
+            return
+        self._pinned_targets = updated
+        self._save_pinned_targets()
+        self.source_target_bar.set_pinned_targets(self._pinned_targets)
+
+    def _save_pinned_targets(self) -> None:
+        self.settings.setValue("paths/pinned_target_json", serialize_pinned_paths(self._pinned_targets))
+        self.settings.sync()
 
     def open_redundancy_scan(self) -> None:
         """打开冗余帧扫描工具；若在工具里移动了来源目录下的文件，回来后刷新对比。"""
@@ -490,6 +597,8 @@ class MainController(MainWindow):
         self.source_target_bar.set_paths(source, target)
         self.source_target_bar.refresh_button.setEnabled(bool(source and target))
         self._refresh_recent_menus()
+        self._pinned_targets = load_pinned_paths(self.settings.value("paths/pinned_target_json", None))
+        self.source_target_bar.set_pinned_targets(self._pinned_targets)
         if source and target:
             self.source_target_bar.set_scan_status("已恢复上次目录，点击“刷新对比”开始扫描", "idle")
 
