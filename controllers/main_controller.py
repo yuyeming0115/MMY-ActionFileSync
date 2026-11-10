@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path, PurePosixPath
 
-from PySide6.QtCore import QThread, QTimer
-from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
+from PySide6.QtCore import QThread, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 
 from models.app_state import AppState
 from models.preview_item import PreviewItem
 from services.action_diff_service import ActionDiffService
+from services.backup_service import BackupService, default_backup_dir
 from services.transfer_service import TransferService
 from utils.cancel_token import CancellationToken
 from utils.hash_utils import HashCache
@@ -47,6 +50,9 @@ class MainController(MainWindow):
         self._scan_cancel_token: CancellationToken | None = None
         self._transfer_cancel_token: CancellationToken | None = None
         self._pinned_targets: list[str] = []
+        self._backup_aborted = False
+        self._backup_aborted_reason = ""
+        self._closing = False
 
         self.source_target_bar.path_changed.connect(self.on_paths_changed)
         self.source_target_bar.refresh_requested.connect(self.refresh_compare)
@@ -58,6 +64,14 @@ class MainController(MainWindow):
         self.source_target_bar.add_pinned_target_requested.connect(self.add_pinned_target)
         self.source_target_bar.unpin_target_requested.connect(self.unpin_target_path)
         self.source_target_bar.move_pinned_target_requested.connect(self.move_pinned_target)
+        self.source_target_bar.backup_config_changed.connect(
+            lambda enabled, path: self._on_backup_config_changed(enabled, path, sync_settings=True)
+        )
+        self.source_target_bar.backup_config_edited.connect(
+            lambda enabled, path: self._on_backup_config_changed(enabled, path, sync_settings=False)
+        )
+        self.source_target_bar.open_backup_dir_requested.connect(self._open_backup_dir)
+        self.source_target_bar.reset_backup_dir_requested.connect(self._reset_backup_dir)
         self.action_diff_panel.action_selected.connect(self.on_action_selected)
         self.action_diff_panel.selection_changed.connect(self.on_selection_changed)
         self.action_diff_panel.jump_filter_relaxed.connect(self._on_jump_filter_relaxed)
@@ -81,14 +95,35 @@ class MainController(MainWindow):
             if reply != QMessageBox.Yes:
                 event.ignore()
                 return
+            self._closing = True
+            self._pending_refresh = False
             # 请求取消所有任务
             if self._scan_cancel_token:
                 self._scan_cancel_token.cancel()
             if self._transfer_cancel_token:
                 self._transfer_cancel_token.cancel()
-            # 给线程一点时间退出，但不阻塞 UI——由 Qt 退出时清理
+            # 等待后台线程安全退出，防止关闭窗口时强杀或破坏正在清理的临时文件
+            deadline = time.monotonic() + 5.0
+            while any(not self._thread_finished(thread) for thread in list(self._active_threads)) and time.monotonic() < deadline:
+                QApplication.processEvents()
+                time.sleep(0.01)
+            for thread in list(self._active_threads):
+                try:
+                    if thread.isRunning():
+                        thread.quit()
+                        thread.wait(500)
+                except RuntimeError:
+                    pass
+            QApplication.processEvents()
+            if any(not self._thread_finished(thread) for thread in list(self._active_threads)):
+                self._closing = False
+                event.ignore()
+                QMessageBox.warning(self, "等待任务结束", "后台任务仍在收尾清理，请稍候几秒后再关闭窗口。")
+                return
             super().closeEvent(event)
             return
+        self._closing = True
+        self._pending_refresh = False
         super().closeEvent(event)
 
     def on_paths_changed(self, source_path: str, target_path: str) -> None:
@@ -379,12 +414,13 @@ class MainController(MainWindow):
         else:
             self.source_target_bar.set_scan_status("扫描失败", "error")
             self.transfer_panel.append_log(message, "error")
-            QMessageBox.critical(self, "扫描失败", message)
+            if not self._closing:
+                QMessageBox.critical(self, "扫描失败", message)
         self._run_pending_refresh()
 
     def _run_pending_refresh(self) -> None:
         """当前任务结束后补跑一次被吞掉的刷新请求。"""
-        if not self._pending_refresh:
+        if self._closing or not self._pending_refresh:
             return
         self._pending_refresh = False
         QTimer.singleShot(0, self.refresh_compare)
@@ -465,15 +501,25 @@ class MainController(MainWindow):
         if not paths:
             QMessageBox.information(self, "提示", "请先勾选要传输的动作或文件。")
             return
+        backup_enabled, backup_dir = self.source_target_bar.backup_config()
         dialog = TransferPreviewDialog(
             self.state.left_root_path,
             self.state.right_root_path,
             paths,
             self.action_diff_service.file_to_action(self.state.action_items),
+            backup_enabled=backup_enabled,
+            backup_dir=backup_dir,
+            action_statuses={action.relative_path: action.status for action in self.state.action_items},
+            parent=self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        try:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            selected = dialog.selected_paths() if accepted else []
+        finally:
+            dialog.deleteLater()
+        if not accepted:
             return
-        final_paths = dialog.selected_paths()
+        final_paths = selected
         if not final_paths:
             return
         self.action_diff_panel.set_selected_paths(set(final_paths))
@@ -488,7 +534,21 @@ class MainController(MainWindow):
         if job.total_files == 0:
             QMessageBox.information(self, "提示", "选中范围内没有可复制文件。")
             return
+        backup_enabled, backup_dir = self.source_target_bar.backup_config()
+        if backup_enabled:
+            try:
+                backup_dir = BackupService.validate_backup_dir(
+                    self.state.left_root_path,
+                    self.state.right_root_path,
+                    backup_dir,
+                )
+            except ValueError as exc:
+                self.transfer_panel.append_log(f"传输前备份校验失败: {exc}", "error")
+                QMessageBox.warning(self, "备份目录不可用", str(exc))
+                return
         self.transfer_panel.reset_progress()
+        self._backup_aborted = False
+        self._backup_aborted_reason = ""
         self._transfer_in_progress = True
         self._transfer_cancel_token = CancellationToken()
         self.transfer_panel.set_busy(True)
@@ -498,7 +558,16 @@ class MainController(MainWindow):
         self._failed = 0
         self._skipped = 0
         self.transfer_panel.append_log(f"开始传输，共 {job.total_files} 个文件。", "info")
-        self._run_transfer_worker(TransferWorker(job, cancel_token=self._transfer_cancel_token))
+        self._run_transfer_worker(
+            TransferWorker(
+                job,
+                cancel_token=self._transfer_cancel_token,
+                backup_enabled=backup_enabled,
+                backup_dir=backup_dir,
+                left_root=self.state.left_root_path,
+                right_root=self.state.right_root_path,
+            )
+        )
 
     def cancel_transfer(self) -> None:
         """请求取消当前传输。"""
@@ -509,6 +578,11 @@ class MainController(MainWindow):
     def _run_transfer_worker(self, worker: TransferWorker) -> None:
         thread = QThread(self)
         worker.moveToThread(thread)
+        worker.backup_started.connect(self._on_backup_started)
+        worker.backup_progress.connect(self._on_backup_progress)
+        worker.backup_finished.connect(self._on_backup_finished)
+        worker.backup_skipped.connect(self._on_backup_skipped)
+        worker.backup_failed.connect(self._on_backup_failed)
         worker.job_started.connect(self._on_job_started)
         worker.file_started.connect(self._on_file_started)
         worker.progress_changed.connect(self._on_progress_changed)
@@ -522,6 +596,32 @@ class MainController(MainWindow):
         self._active_threads.append(thread)
         self._active_workers.append(worker)
         thread.start()
+
+    def _on_backup_started(self, total_files: int) -> None:
+        self.transfer_panel.set_progress(0, total_files, prefix="备份进度")
+        self.transfer_panel.status_label.setText(f"正在备份旧文件 (0/{total_files})")
+        self.transfer_panel.append_log(
+            f"开始传输前备份：共 {total_files} 个将被覆盖的目标旧文件。",
+            "info",
+        )
+
+    def _on_backup_progress(self, current: int, total: int, relative_path: str) -> None:
+        self.transfer_panel.set_progress(current, total, prefix="备份进度")
+        self.transfer_panel.status_label.setText(f"正在备份旧文件: {relative_path} ({current}/{total})")
+
+    def _on_backup_finished(self, created: bool, zip_path: str, file_count: int, total_bytes: int) -> None:
+        if created:
+            self.transfer_panel.append_log(
+                f"传输前备份完成：{file_count} 个旧文件 ({self._format_size(total_bytes)}) -> {zip_path}",
+                "success",
+            )
+
+    def _on_backup_skipped(self, reason: str) -> None:
+        self.transfer_panel.append_log(f"传输前备份：{reason}", "info")
+
+    def _on_backup_failed(self, message: str) -> None:
+        self._backup_aborted = True
+        self._backup_aborted_reason = message
 
     def _on_job_started(self, total_files: int) -> None:
         self._total_files = total_files
@@ -559,6 +659,21 @@ class MainController(MainWindow):
         self._transfer_in_progress = False
         self._transfer_cancel_token = None
         self.transfer_panel.set_stats(success, failed, skipped)
+        if self._backup_aborted:
+            reason = self._backup_aborted_reason or "未知错误"
+            self._backup_aborted = False
+            self._backup_aborted_reason = ""
+            self.transfer_panel.set_busy(False)
+            self.transfer_panel.set_transfer_enabled(True)
+            self.source_target_bar.set_busy(False)
+            self.action_diff_panel.set_controls_enabled(True)
+            if not self._closing:
+                QMessageBox.critical(
+                    self,
+                    "传输前备份失败",
+                    f"备份失败，已中止本次传输（目标目录文件未被修改）：\n{reason}",
+                )
+            return
         was_cancelled = skipped > 0
         if was_cancelled:
             self.transfer_panel.append_log(
@@ -573,8 +688,9 @@ class MainController(MainWindow):
         self.transfer_panel.set_busy(False)
         self.source_target_bar.set_busy(False)
         self.action_diff_panel.set_controls_enabled(True)
-        # 取消后不复扫，避免用户等待
-        if not was_cancelled:
+        self.transfer_panel.set_transfer_enabled(True)
+        # 取消或窗口关闭时不复扫，避免用户等待
+        if not was_cancelled and not self._closing:
             QTimer.singleShot(0, self.refresh_compare)
 
     def clear_all_lists(self) -> None:
@@ -584,6 +700,7 @@ class MainController(MainWindow):
         self.state = AppState()
         self.source_target_bar.set_paths("", "")
         self.source_target_bar.set_scan_status("请选择来源和目标目录", "idle")
+        self.source_target_bar.refresh_button.setEnabled(False)
         self.action_diff_panel.reset()
         self.preview_panel.clear_all()
         self.transfer_panel.reset_progress()
@@ -599,8 +716,72 @@ class MainController(MainWindow):
         self._refresh_recent_menus()
         self._pinned_targets = load_pinned_paths(self.settings.value("paths/pinned_target_json", None))
         self.source_target_bar.set_pinned_targets(self._pinned_targets)
+        self._restore_backup_config()
         if source and target:
             self.source_target_bar.set_scan_status("已恢复上次目录，点击“刷新对比”开始扫描", "idle")
+
+    def _restore_backup_config(self) -> None:
+        enabled = self._parse_bool_setting(
+            self.settings.value("transfer/autoBackupEnabled", True),
+            default=True,
+        )
+        if self.settings.contains("transfer/backupDir"):
+            raw_dir = str(self.settings.value("transfer/backupDir", "") or "")
+            backup_dir = normalize_path(raw_dir.strip()) if raw_dir.strip() else ""
+        else:
+            backup_dir = default_backup_dir()
+        self.source_target_bar.set_backup_config(enabled, backup_dir)
+
+    def _on_backup_config_changed(self, enabled: bool, backup_dir: str, *, sync_settings: bool = True) -> None:
+        self.settings.setValue("transfer/autoBackupEnabled", bool(enabled))
+        normalized = normalize_path(backup_dir.strip()) if backup_dir.strip() else ""
+        self.settings.setValue("transfer/backupDir", normalized)
+        if sync_settings:
+            self.settings.sync()
+
+    def _open_backup_dir(self, path: str) -> None:
+        target = (path or "").strip() or self.source_target_bar.backup_config()[1]
+        if not target:
+            QMessageBox.information(self, "提示", "请先设置备份目录。")
+            return
+        folder = Path(target)
+        if folder.is_dir():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+            return
+        reply = QMessageBox.question(
+            self,
+            "备份目录尚未创建",
+            f"备份目录当前不存在（首次执行有覆盖的传输时会自动创建）：\n{target}\n\n是否现在创建并打开？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                QMessageBox.warning(self, "创建备份目录失败", f"无法创建备份目录：\n{target}\n\n{exc}")
+                return
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _reset_backup_dir(self) -> None:
+        default_dir = default_backup_dir()
+        enabled, _ = self.source_target_bar.backup_config()
+        self.source_target_bar.set_backup_config(enabled, default_dir)
+        self._on_backup_config_changed(enabled, default_dir)
+        self.transfer_panel.append_log(f"已恢复默认备份目录: {default_dir}", "info")
+
+    @staticmethod
+    def _parse_bool_setting(value: object, default: bool = True) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"true", "1", "yes"}:
+            return True
+        if text in {"false", "0", "no"}:
+            return False
+        return default
 
     def _run_worker(self, worker, finished, failed) -> None:
         thread = QThread(self)
@@ -621,6 +802,13 @@ class MainController(MainWindow):
             self._active_workers.remove(worker)
         if thread in self._active_threads:
             self._active_threads.remove(thread)
+
+    @staticmethod
+    def _thread_finished(thread: QThread) -> bool:
+        try:
+            return not thread.isRunning()
+        except RuntimeError:
+            return True
 
     @staticmethod
     def _format_size(size: int) -> str:

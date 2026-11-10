@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QPointF, QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStyle,
+    QStyleOptionButton,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -27,18 +29,53 @@ from utils.pinned_paths import contains_pinned_path, format_pinned_labels
 from views.flow_layout import ButtonRowArea
 
 
+class _BackupToggleCheckBox(QCheckBox):
+    """在 QSS 自定义指示器之上绘制抗锯齿白色对勾，避免依赖 QtSvg 插件。"""
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        if not self.isChecked():
+            return
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        indicator = self.style().subElementRect(QStyle.SE_CheckBoxIndicator, opt, self)
+        if not indicator.isValid():
+            return
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            pen = QPen(QColor("#ffffff" if self.isEnabled() else "#96A1AD"))
+            pen.setWidthF(1.8)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            x, y, w, h = indicator.x(), indicator.y(), indicator.width(), indicator.height()
+            painter.drawPolyline(
+                [
+                    QPointF(x + w * 0.22, y + h * 0.54),
+                    QPointF(x + w * 0.43, y + h * 0.74),
+                    QPointF(x + w * 0.78, y + h * 0.28),
+                ]
+            )
+        finally:
+            painter.end()
+
+
 class DropPathEdit(QLineEdit):
     path_dropped = Signal(str)
 
-    def __init__(self) -> None:
+    def __init__(self, *, read_only: bool = True, placeholder: str = "拖入目录或点击选择") -> None:
         super().__init__()
-        self.setReadOnly(True)
+        self.setReadOnly(read_only)
         self.setAcceptDrops(True)
-        self.setPlaceholderText("拖入目录或点击选择")
+        self.setPlaceholderText(placeholder)
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
+            return
+        if not self.isReadOnly():
+            super().dragEnterEvent(event)
 
     def dropEvent(self, event) -> None:  # type: ignore[override]
         urls = event.mimeData().urls()
@@ -49,7 +86,11 @@ class DropPathEdit(QLineEdit):
             if dropped is not None and dropped.is_file():
                 dropped = dropped.parent
             if dropped is not None and dropped.is_dir():
+                event.acceptProposedAction()
                 self.path_dropped.emit(str(dropped))
+            return
+        if not self.isReadOnly():
+            super().dropEvent(event)
 
 
 class PathRoleField(QFrame):
@@ -269,6 +310,151 @@ class PinnedTargetBar(QFrame):
         QMessageBox.warning(self, "目录不存在", f"目录不存在或暂不可访问：\n{path}")
 
 
+class BackupConfigBar(QFrame):
+    """顶部传输前自动回滚备份设置条（方案 A：仅备份将被覆盖的目标旧文件）。"""
+
+    config_changed = Signal(bool, str)
+    config_edited = Signal(bool, str)
+    open_dir_requested = Signal(str)
+    reset_default_requested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setProperty("backupBar", True)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
+        self._syncing = False
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 8, 3)
+        layout.setSpacing(6)
+
+        self.enabled_checkbox = _BackupToggleCheckBox("传输前备份zip")
+        self.enabled_checkbox.setProperty("backupToggle", True)
+        self.enabled_checkbox.setChecked(True)
+        self.enabled_checkbox.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.enabled_checkbox.setToolTip(
+            "启用后，在每次点击确认「开始传输」且正式覆盖前，自动将被覆盖的目标旧文件打包为回滚 zip"
+        )
+        self.enabled_checkbox.setAccessibleName("传输前备份zip")
+
+        self.path_edit = DropPathEdit(
+            read_only=False,
+            placeholder="输入、拖入或选择备份目录（覆盖前先打包旧文件）",
+        )
+        self.path_edit.setProperty("backupPathEdit", True)
+        self.path_edit.setMinimumWidth(80)
+        self.path_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.path_edit.setToolTip("回滚备份 zip 保存目录（支持直接编辑、拖入目录或点击右侧图标选择；右键可恢复默认）")
+        self.path_edit.setAccessibleName("备份目录")
+
+        self.browse_button = QToolButton()
+        self.browse_button.setProperty("backupToolButton", True)
+        self.browse_button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
+        self.browse_button.setIconSize(QSize(14, 14))
+        self.browse_button.setToolTip("选择备份目录")
+        self.browse_button.setAccessibleName("选择备份目录")
+
+        self.open_button = QPushButton("打开")
+        self.open_button.setProperty("backupOpenButton", True)
+        self.open_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.open_button.setCursor(Qt.PointingHandCursor)
+        self.open_button.setToolTip("在文件管理器中打开备份目录")
+        self.open_button.setAccessibleName("打开备份目录")
+
+        layout.addWidget(self.enabled_checkbox)
+        layout.addWidget(self.path_edit, 1)
+        layout.addWidget(self.browse_button)
+        layout.addWidget(self.open_button)
+
+        self.enabled_checkbox.toggled.connect(self._on_toggled)
+        self.path_edit.textEdited.connect(self._on_text_edited)
+        self.path_edit.editingFinished.connect(self._on_editing_finished)
+        self.path_edit.path_dropped.connect(self._on_path_dropped)
+        self.browse_button.clicked.connect(self._choose_dir)
+        self.open_button.clicked.connect(lambda: self.open_dir_requested.emit(self.backup_dir()))
+
+    def is_enabled(self) -> bool:
+        return self.enabled_checkbox.isChecked()
+
+    def backup_dir(self) -> str:
+        raw = self.path_edit.text().strip()
+        return normalize_path(raw) if raw else ""
+
+    def set_config(self, enabled: bool, backup_dir: str) -> None:
+        normalized = normalize_path(backup_dir.strip()) if backup_dir.strip() else ""
+        self._syncing = True
+        try:
+            self.enabled_checkbox.setChecked(bool(enabled))
+            self.path_edit.setText(normalized)
+            self._sync_input_enabled()
+        finally:
+            self._syncing = False
+
+    def _sync_input_enabled(self) -> None:
+        checked = self.enabled_checkbox.isChecked()
+        self.path_edit.setEnabled(checked)
+        self.browse_button.setEnabled(checked)
+
+    def _on_toggled(self, _checked: bool) -> None:
+        self._sync_input_enabled()
+        if not self._syncing:
+            self.config_changed.emit(self.is_enabled(), self.backup_dir())
+
+    def _on_text_edited(self, _text: str) -> None:
+        if not self._syncing:
+            self.config_edited.emit(self.is_enabled(), self.backup_dir())
+
+    def _on_editing_finished(self) -> None:
+        normalized = self.backup_dir()
+        if self.path_edit.text() != normalized:
+            self._syncing = True
+            try:
+                self.path_edit.setText(normalized)
+            finally:
+                self._syncing = False
+        if not self._syncing:
+            self.config_changed.emit(self.is_enabled(), normalized)
+
+    def _on_path_dropped(self, path: str) -> None:
+        self._set_dir_and_emit(path)
+
+    def _choose_dir(self) -> None:
+        current = self.backup_dir()
+        start_dir = ""
+        if current:
+            candidate = Path(current)
+            for probe in (candidate, *candidate.parents):
+                if probe.is_dir():
+                    start_dir = str(probe)
+                    break
+        chosen = QFileDialog.getExistingDirectory(self, "选择传输前备份目录", start_dir)
+        if chosen:
+            self._set_dir_and_emit(chosen)
+
+    def _set_dir_and_emit(self, path: str) -> None:
+        normalized = normalize_path(path.strip()) if path.strip() else ""
+        self._syncing = True
+        try:
+            self.path_edit.setText(normalized)
+        finally:
+            self._syncing = False
+        self.config_changed.emit(self.is_enabled(), normalized)
+
+    def _show_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        menu.addAction("在文件管理器中打开", lambda: self.open_dir_requested.emit(self.backup_dir()))
+        menu.addAction("恢复默认备份目录", self.reset_default_requested.emit)
+        path = self.backup_dir()
+        copy_action = menu.addAction("复制路径", lambda: QApplication.clipboard().setText(path))
+        copy_action.setEnabled(bool(path))
+        try:
+            menu.exec(self.mapToGlobal(pos))
+        finally:
+            menu.deleteLater()
+
+
 class SourceTargetBar(QWidget):
     path_changed = Signal(str, str)
     refresh_requested = Signal()
@@ -280,6 +466,10 @@ class SourceTargetBar(QWidget):
     add_pinned_target_requested = Signal()
     unpin_target_requested = Signal(str)
     move_pinned_target_requested = Signal(str, int)
+    backup_config_changed = Signal(bool, str)
+    backup_config_edited = Signal(bool, str)
+    open_backup_dir_requested = Signal(str)
+    reset_backup_dir_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -334,11 +524,13 @@ class SourceTargetBar(QWidget):
         direction_layout.addWidget(copy_label)
         direction_layout.addStretch(1)
         self.target_field = PathRoleField("目标｜SVN 工作目录", "将写入/覆盖", "target", enable_pin=True)
+        self.backup_bar = BackupConfigBar()
         self.pinned_target_bar = PinnedTargetBar()
 
         path_grid.addWidget(self.source_field, 0, 0)
         path_grid.addWidget(direction, 0, 1)
         path_grid.addWidget(self.target_field, 0, 2)
+        path_grid.addWidget(self.backup_bar, 1, 0, Qt.AlignTop)
         path_grid.addWidget(self.pinned_target_bar, 1, 2)
 
         layout.addLayout(toolbar)
@@ -348,6 +540,10 @@ class SourceTargetBar(QWidget):
         self.target_field.path_changed.connect(lambda _: self._emit_paths())
         self.target_field.pin_clicked.connect(self._on_pin_clicked)
         self.target_field.edit.textChanged.connect(lambda _: self.sync_pinned_state())
+        self.backup_bar.config_changed.connect(self.backup_config_changed.emit)
+        self.backup_bar.config_edited.connect(self.backup_config_edited.emit)
+        self.backup_bar.open_dir_requested.connect(self.open_backup_dir_requested.emit)
+        self.backup_bar.reset_default_requested.connect(self.reset_backup_dir_requested.emit)
         self.pinned_target_bar.path_selected.connect(self.pinned_target_selected.emit)
         self.pinned_target_bar.add_requested.connect(self.add_pinned_target_requested.emit)
         self.pinned_target_bar.unpin_requested.connect(self.unpin_target_requested.emit)
@@ -371,6 +567,12 @@ class SourceTargetBar(QWidget):
         self.pinned_target_bar.set_paths(self._pinned_targets, self.target_field.path())
         self.sync_pinned_state()
 
+    def set_backup_config(self, enabled: bool, backup_dir: str) -> None:
+        self.backup_bar.set_config(enabled, backup_dir)
+
+    def backup_config(self) -> tuple[bool, str]:
+        return self.backup_bar.is_enabled(), self.backup_bar.backup_dir()
+
     def sync_pinned_state(self) -> None:
         current = self.target_field.path().strip()
         is_pinned = contains_pinned_path(self._pinned_targets, current)
@@ -389,6 +591,7 @@ class SourceTargetBar(QWidget):
     def set_busy(self, busy: bool) -> None:
         self.source_field.setEnabled(not busy)
         self.target_field.setEnabled(not busy)
+        self.backup_bar.setEnabled(not busy)
         self.pinned_target_bar.setEnabled(not busy)
         self.refresh_button.setVisible(not busy)
         self.cancel_button.setVisible(busy)

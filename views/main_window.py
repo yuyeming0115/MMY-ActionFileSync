@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QByteArray, QSettings, Qt
+from PySide6.QtCore import QByteArray, Qt
 from PySide6.QtWidgets import QMainWindow, QSplitter, QVBoxLayout, QWidget
 
-from utils.app_info import APP_VERSION
+from utils.app_info import APP_VERSION, create_app_settings
 from views.action_diff_panel import ActionDiffPanel
 from views.preview_panel import PreviewPanel
 from views.source_target_bar import SourceTargetBar
@@ -13,7 +13,7 @@ from views.transfer_panel import TransferPanel
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        self.settings = create_app_settings()
         self.setWindowTitle(f"MMY-Tools · Action File Sync v{APP_VERSION}")
         self.resize(1440, 900)
         self.setMinimumSize(1280, 720)
@@ -87,7 +87,7 @@ class MainWindow(QMainWindow):
             QMainWindow, QWidget {
                 background: #1E2023;
                 color: #E8E4D9;
-                font-family: "Microsoft YaHei UI";
+                font-family: "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif;
                 font-size: 13px;
             }
             QLabel[appTitle="true"] { font-size: 16px; font-weight: 600; }
@@ -181,6 +181,77 @@ class MainWindow(QMainWindow):
             }
             QToolButton[compassToggle="true"] { padding: 3px 8px; min-height: 0; }
             QToolButton[compassToggle="true"]:checked { color: #D4AF37; border-color: #D4AF37; }
+            QFrame[backupBar="true"] {
+                background: #1c242d;
+                border: 1px solid #2b455f;
+                border-radius: 6px;
+            }
+            QCheckBox[backupToggle="true"] {
+                color: #82b8e8;
+                font-size: 12px;
+                font-weight: 600;
+                spacing: 6px;
+            }
+            QCheckBox[backupToggle="true"]:disabled {
+                color: #5A6068;
+            }
+            QCheckBox[backupToggle="true"]::indicator {
+                width: 14px;
+                height: 14px;
+                border-radius: 3px;
+                border: 1px solid #4c6c8c;
+                background: #1E2023;
+            }
+            QCheckBox[backupToggle="true"]::indicator:checked {
+                background: #1769aa;
+                border-color: #5b9bd5;
+            }
+            QCheckBox[backupToggle="true"]::indicator:disabled {
+                background: #23262a;
+                border-color: #3A3F46;
+            }
+            QFrame[backupBar="true"] QLineEdit[backupPathEdit="true"] {
+                background: #222931;
+                border: 1px solid #31475c;
+                border-radius: 5px;
+                padding: 2px 8px;
+                min-height: 20px;
+                font-size: 12px;
+                color: #E8E4D9;
+            }
+            QFrame[backupBar="true"] QLineEdit[backupPathEdit="true"]:focus {
+                border-color: #5b9bd5;
+            }
+            QFrame[backupBar="true"] QLineEdit[backupPathEdit="true"]:disabled {
+                background: #1f2328;
+                border-color: #32373d;
+                color: #6D7782;
+            }
+            QFrame[backupBar="true"] QToolButton[backupToolButton="true"],
+            QFrame[backupBar="true"] QPushButton[backupOpenButton="true"] {
+                background: #2A2E33;
+                border: 1px solid #364859;
+                border-radius: 5px;
+                padding: 2px 8px;
+                min-height: 20px;
+                font-size: 12px;
+                color: #E8E4D9;
+            }
+            QFrame[backupBar="true"] QToolButton[backupToolButton="true"] {
+                min-width: 24px;
+                padding: 2px 5px;
+            }
+            QFrame[backupBar="true"] QToolButton[backupToolButton="true"]:hover,
+            QFrame[backupBar="true"] QPushButton[backupOpenButton="true"]:hover {
+                border-color: #5b9bd5;
+                color: #ffffff;
+            }
+            QFrame[backupBar="true"] QToolButton[backupToolButton="true"]:disabled,
+            QFrame[backupBar="true"] QPushButton[backupOpenButton="true"]:disabled {
+                background: #23262a;
+                border-color: #3A3F46;
+                color: #5A6068;
+            }
             QFrame[pinnedBar="true"] {
                 background: #231e19;
                 border: 1px solid #4d3726;

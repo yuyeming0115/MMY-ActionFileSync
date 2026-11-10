@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 
 from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal
-from PySide6.QtGui import QColor, QKeySequence, QShortcut, QStandardItem, QStandardItemModel
+from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -42,6 +42,8 @@ STATUS_FOREGROUND = {
     "only_right": QColor("#b985d9"),
     "unknown": QColor("#96A1AD"),
 }
+
+EXTRA_TO_TARGET_FOREGROUND = QColor("#ff6b5e")
 
 ACTION_HIGHLIGHT_STATUSES = ("only_left", "different")
 
@@ -647,6 +649,23 @@ class ActionDiffPanel(QWidget):
         status_item.setData(action, ROLE_OBJECT)
         status_item.setForeground(status_color)
         change_item = QStandardItem(action.change_summary)
+        if action.adds_extra_to_existing_target:
+            counts = action.change_counts
+            extra_count = counts["only_left"]
+            right_only_count = counts["only_right"]
+            change_item.setForeground(EXTRA_TO_TARGET_FOREGROUND)
+            bold_font = QFont(self.view.font())
+            bold_font.setBold(True)
+            change_item.setFont(bold_font)
+            if right_only_count:
+                change_item.setToolTip(
+                    f"强提示：SVN 目标已有该动作，来源多出 {extra_count} 个未同名文件"
+                    f"（另有 {right_only_count} 个 SVN 原文件不会被覆盖），传输后会比 SVN 多出这些文件。"
+                )
+            else:
+                change_item.setToolTip(
+                    f"强提示：SVN 目标已有该动作，来源多出 {extra_count} 个文件，传输后会比 SVN 多出 {extra_count} 个文件。"
+                )
         size_item = QStandardItem(self._format_size(action.transfer_size_bytes))
         size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         if action.status == "same":
@@ -654,7 +673,7 @@ class ActionDiffPanel(QWidget):
                 it.setForeground(status_color)
         return [selection_item, direction_item, group_item, action_item, status_item, change_item, size_item]
 
-    def _build_file_row(self, item: FileDiffItem) -> list[QStandardItem]:
+    def _build_file_row(self, item: FileDiffItem, *, parent_adds_extra: bool = False) -> list[QStandardItem]:
         selection_item = QStandardItem()
         selection_item.setData("file", ROLE_KIND)
         selection_item.setData(item, ROLE_OBJECT)
@@ -674,6 +693,13 @@ class ActionDiffPanel(QWidget):
         status_item = QStandardItem(STATUS_LABELS.get(item.status, item.status))
         status_item.setForeground(status_color)
         change_item = QStandardItem()
+        if parent_adds_extra and item.status == "only_left":
+            change_item.setText("+1")
+            change_item.setForeground(EXTRA_TO_TARGET_FOREGROUND)
+            bold_font = QFont(self.view.font())
+            bold_font.setBold(True)
+            change_item.setFont(bold_font)
+            change_item.setToolTip("强提示：目标 SVN 已有该动作但无同名文件，传输后会在目标目录额外多出此文件")
         size_item = QStandardItem(self._format_size(item.size_bytes))
         size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         if item.status == "same":
@@ -692,8 +718,9 @@ class ActionDiffPanel(QWidget):
         self._updating_checks = True
         try:
             item.removeRows(0, item.rowCount())
+            parent_adds_extra = action.adds_extra_to_existing_target
             for file_item in action.file_diffs:
-                item.appendRow(self._build_file_row(file_item))
+                item.appendRow(self._build_file_row(file_item, parent_adds_extra=parent_adds_extra))
         finally:
             self._updating_checks = False
 

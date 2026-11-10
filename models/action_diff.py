@@ -45,11 +45,25 @@ class ActionDiffItem:
         return sum(item.size_bytes for item in self.transferable_files)
 
     @property
-    def change_summary(self) -> str:
+    def change_counts(self) -> dict[str, int]:
         counts = {"only_left": 0, "different": 0, "only_right": 0}
         for item in self.file_diffs:
             if item.status in counts:
                 counts[item.status] += 1
+        return counts
+
+    @property
+    def only_left_count(self) -> int:
+        return sum(1 for item in self.file_diffs if item.status == "only_left")
+
+    @property
+    def adds_extra_to_existing_target(self) -> bool:
+        """目标侧已存在该动作，但本次仍包含会比 SVN 多出的来源独有文件。"""
+        return self.status == "different" and self.only_left_count > 0
+
+    @property
+    def change_summary(self) -> str:
+        counts = self.change_counts
         parts: list[str] = []
         if counts["only_left"]:
             parts.append(f"+{counts['only_left']}")

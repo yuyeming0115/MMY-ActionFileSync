@@ -232,6 +232,48 @@ class TransferServiceTests(unittest.TestCase):
             leftovers = [p for p in target_dir.iterdir() if ".tmp-" in p.name]
             self.assertFalse(leftovers, f"不应残留临时文件: {leftovers}")
 
+    def test_expand_atlas_pairs_works_inside_subdirectories(self) -> None:
+        """子目录下的同名 png + plist 也必须按图集规则成对补全并保留相对子目录。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            target = root / "target"
+            sub = source / "role_a" / "NW"
+            sub.mkdir(parents=True)
+            (sub / "atlas_01.png").write_bytes(b"png")
+            (sub / "atlas_01.plist").write_text("<plist/>", encoding="utf-8")
+            (sub / "single.png").write_bytes(b"single")
+
+            expanded = TransferService.expand_atlas_paths(source, ["role_a/NW/atlas_01.png", "role_a/NW/single.png"])
+            self.assertEqual(
+                expanded,
+                [
+                    "role_a/NW/atlas_01.plist",
+                    "role_a/NW/atlas_01.png",
+                    "role_a/NW/single.png",
+                ],
+            )
+            job = TransferService().build_job_for_files(str(source), str(target), ["role_a/NW/atlas_01.plist"])
+            self.assertEqual(
+                [item.relative_path for item in job.items],
+                ["role_a/NW/atlas_01.plist", "role_a/NW/atlas_01.png"],
+            )
+
+    def test_expand_atlas_pairs_handles_mixed_case_extensions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            sub = source / "sub"
+            sub.mkdir(parents=True)
+            (sub / "boss_idle.PNG").write_bytes(b"png")
+            (sub / "boss_idle.PLIST").write_text("<plist/>", encoding="utf-8")
+
+            expanded = TransferService.expand_atlas_paths(source, ["sub/boss_idle.PNG"])
+            self.assertEqual(
+                sorted(p.casefold() for p in expanded),
+                ["sub/boss_idle.plist", "sub/boss_idle.png"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

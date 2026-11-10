@@ -14,11 +14,19 @@ def resource_path(relative_path: str) -> Path:
     return bundle_root / relative_path
 
 
+def resolve_app_icon_path() -> Path:
+    if sys.platform != "win32":
+        png_icon = resource_path("assets/icon.png")
+        if png_icon.is_file():
+            return png_icon
+    return resource_path("assets/icon.ico")
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     app.setOrganizationName("MMY-Tools")
     app.setApplicationName("MMY Action File Sync")
-    app.setWindowIcon(QIcon(str(resource_path("assets/icon.ico"))))
+    app.setWindowIcon(QIcon(str(resolve_app_icon_path())))
 
     controller = MainController()
     controller.show()

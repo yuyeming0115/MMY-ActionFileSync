@@ -21,6 +21,7 @@ if HAS_QT:
     from PIL import Image
 
     from controllers.main_controller import MainController
+    from utils.app_info import create_app_settings
     from utils.path_matcher import normalize_path
     from views.action_diff_panel import ActionDiffPanel
     from views.main_window import MainWindow
@@ -43,12 +44,14 @@ class UiWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.settings_dir = tempfile.TemporaryDirectory()
+        cls._prev_format = QSettings.defaultFormat()
         QSettings.setDefaultFormat(QSettings.IniFormat)
         QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, cls.settings_dir.name)
         cls.app = QApplication.instance() or QApplication([])
 
     @classmethod
     def tearDownClass(cls) -> None:
+        QSettings.setDefaultFormat(cls._prev_format)
         cls.settings_dir.cleanup()
 
     def test_action_selection_survives_search_filter(self) -> None:
@@ -461,7 +464,7 @@ class UiWorkflowTests(unittest.TestCase):
         self._dispose(panel)
 
     def test_compass_toggle_persists_across_restart(self) -> None:
-        settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        settings = create_app_settings()
         settings.clear()
         settings.setValue("preview/compass_visible", False)
         settings.sync()
@@ -559,6 +562,8 @@ class UiWorkflowTests(unittest.TestCase):
             controller.state.action_items = [action]
             controller.action_diff_panel.populate([action], {relative})
             controller.state.selected_file_paths = {relative}
+            backup_dir = root / "backups"
+            controller.source_target_bar.set_backup_config(True, str(backup_dir))
 
             def confirm_dialog() -> None:
                 dialog = QApplication.activeModalWidget()
@@ -630,7 +635,7 @@ class UiWorkflowTests(unittest.TestCase):
         self._dispose(window)
 
     def test_recent_directories_survive_clear_and_restore_on_restart(self) -> None:
-        settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        settings = create_app_settings()
         settings.clear()
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "source"
@@ -664,7 +669,7 @@ class UiWorkflowTests(unittest.TestCase):
         settings.sync()
 
     def test_source_change_auto_matches_same_name_target(self) -> None:
-        settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        settings = create_app_settings()
         settings.clear()
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
@@ -790,6 +795,8 @@ class UiWorkflowTests(unittest.TestCase):
             controller.action_diff_panel.select_changed()
             selected = set(controller.state.selected_file_paths)
             self.assertEqual(selected, {"player/idle/idle_002.png"})
+            backup_dir = root / "backups"
+            controller.source_target_bar.set_backup_config(True, str(backup_dir))
 
             controller._start_transfer(sorted(selected))
             self._wait_until(
@@ -816,7 +823,7 @@ class UiWorkflowTests(unittest.TestCase):
 
     def test_same_directory_scan_previews_animation(self) -> None:
         """左右拖入同一目录：清单照常列出动作，两侧预览都要出动画帧。"""
-        settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        settings = create_app_settings()
         settings.clear()
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "hero"
@@ -861,7 +868,7 @@ class UiWorkflowTests(unittest.TestCase):
 
     def test_refresh_requested_during_scan_runs_afterwards(self) -> None:
         """扫描进行中再次请求刷新：结束后必须补跑，避免界面停在旧结果。"""
-        settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        settings = create_app_settings()
         settings.clear()
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
@@ -949,17 +956,19 @@ class UiWorkflowTests(unittest.TestCase):
 class RedundancyDialogTests(unittest.TestCase):
     def setUp(self) -> None:
         # 清掉上一个用例残留的规则持久化，保证默认值断言稳定
-        QSettings("MMY-Tools", "MMY-ActionFileSync").clear()
+        create_app_settings().clear()
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.settings_dir = tempfile.TemporaryDirectory()
+        cls._prev_format = QSettings.defaultFormat()
         QSettings.setDefaultFormat(QSettings.IniFormat)
         QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, cls.settings_dir.name)
         cls.app = QApplication.instance() or QApplication([])
 
     @classmethod
     def tearDownClass(cls) -> None:
+        QSettings.setDefaultFormat(cls._prev_format)
         cls.settings_dir.cleanup()
 
     @staticmethod
@@ -1121,6 +1130,439 @@ class RedundancyDialogTests(unittest.TestCase):
             yes = modal.button(QMessageBox.StandardButton.Yes)
             if yes is not None:
                 yes.click()
+
+
+@unittest.skipUnless(HAS_QT, "需要安装 PySide6")
+class ExtraFilesAlertUiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.settings_dir = tempfile.TemporaryDirectory()
+        cls._prev_format = QSettings.defaultFormat()
+        QSettings.setDefaultFormat(QSettings.IniFormat)
+        QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, cls.settings_dir.name)
+        cls.app = QApplication.instance() or QApplication([])
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        QSettings.setDefaultFormat(cls._prev_format)
+        cls.settings_dir.cleanup()
+
+    def setUp(self) -> None:
+        settings = create_app_settings()
+        settings.clear()
+        settings.sync()
+
+    def tearDown(self) -> None:
+        settings = create_app_settings()
+        settings.clear()
+        settings.sync()
+
+    @staticmethod
+    def _make_file(rel: str, status: str) -> FileDiffItem:
+        return FileDiffItem(
+            rel,
+            Path(rel).name,
+            status,
+            f"src/{rel}" if status != "only_right" else None,
+            f"dst/{rel}" if status != "only_left" else None,
+            100,
+        )
+
+    def test_action_diff_panel_highlights_only_existing_target_extras(self) -> None:
+        actions = [
+            ActionDiffItem(
+                "e/ride_idle",
+                "ride_idle",
+                "E/ride_idle",
+                "different",
+                None,
+                None,
+                [self._make_file(f"E/ride_idle/v2_{i}.png", "only_left") for i in range(8)]
+                + [self._make_file(f"E/ride_idle/old_{i}.png", "only_right") for i in range(8)],
+            ),
+            ActionDiffItem(
+                "se/idle",
+                "idle",
+                "SE/idle",
+                "different",
+                None,
+                None,
+                [self._make_file(f"SE/idle/idle_{i}.png", "different") for i in range(6)]
+                + [self._make_file(f"SE/idle/idle_{i}.png", "only_left") for i in range(6, 8)],
+            ),
+            ActionDiffItem(
+                "se/attack",
+                "attack",
+                "SE/attack",
+                "different",
+                None,
+                None,
+                [self._make_file(f"SE/attack/a_{i}.png", "different") for i in range(8)],
+            ),
+            ActionDiffItem(
+                "w/hurt",
+                "hurt",
+                "W/hurt",
+                "different",
+                None,
+                None,
+                [self._make_file(f"W/hurt/h_{i}.png", "different") for i in range(7)]
+                + [self._make_file("W/hurt/h_7.png", "only_right")],
+            ),
+            ActionDiffItem(
+                "ne/skill",
+                "skill",
+                "NE/skill",
+                "only_left",
+                None,
+                None,
+                [self._make_file(f"NE/skill/s_{i}.png", "only_left") for i in range(8)],
+            ),
+            ActionDiffItem(
+                "s/walk",
+                "walk",
+                "S/walk",
+                "same",
+                None,
+                None,
+                [self._make_file("S/walk/w_0.png", "same")],
+            ),
+        ]
+
+        panel = ActionDiffPanel()
+        panel.populate(actions)
+        panel.filter_buttons["all"].click()
+
+        by_path = {
+            panel.model.item(row, 0).data(Qt.UserRole + 2).relative_path: row
+            for row in range(panel.model.rowCount())
+        }
+
+        for path, expected_text in [("E/ride_idle", "+8 -8"), ("SE/idle", "+2 ~6")]:
+            row = by_path[path]
+            change_item = panel.model.item(row, 5)
+            self.assertEqual(change_item.text(), expected_text)
+            self.assertEqual(change_item.foreground().color().name(), "#ff6b5e")
+            self.assertTrue(change_item.font().bold())
+            self.assertIn("比 SVN 多出", change_item.toolTip())
+
+        for path in ("SE/attack", "W/hurt", "NE/skill"):
+            row = by_path[path]
+            change_item = panel.model.item(row, 5)
+            self.assertIsNone(change_item.data(Qt.ForegroundRole))
+            self.assertFalse(change_item.font().bold())
+            self.assertEqual(change_item.toolTip(), "")
+
+        # 新增待传仍保持绿色，不变红
+        skill_row = by_path["NE/skill"]
+        self.assertEqual(panel.model.item(skill_row, 4).foreground().color().name(), "#4caf50")
+
+        # 已一致保持绿色且不加粗
+        walk_row = by_path["S/walk"]
+        self.assertEqual(panel.model.item(walk_row, 5).foreground().color().name(), "#4caf50")
+        self.assertFalse(panel.model.item(walk_row, 5).font().bold())
+
+        # 展开 E/ride_idle：only_left 子行「变化」列标红 +1，only_right 不标
+        ride_proxy = panel.proxy.mapFromSource(panel.model.index(by_path["E/ride_idle"], 0))
+        panel._on_expanded(ride_proxy)
+        ride_parent = panel.model.item(by_path["E/ride_idle"], 0)
+        self.assertEqual(ride_parent.rowCount(), 16)
+        for idx in range(8):
+            child_change = ride_parent.child(idx, 5)
+            self.assertEqual(child_change.text(), "+1")
+            self.assertEqual(child_change.foreground().color().name(), "#ff6b5e")
+            self.assertTrue(child_change.font().bold())
+            self.assertIn("多出", child_change.toolTip())
+        for idx in range(8, 16):
+            child_change = ride_parent.child(idx, 5)
+            self.assertEqual(child_change.text(), "")
+            self.assertIsNone(child_change.data(Qt.ForegroundRole))
+            self.assertFalse(child_change.font().bold())
+
+        # 展开新增待传 NE/skill：子行不标红 +1
+        skill_proxy = panel.proxy.mapFromSource(panel.model.index(skill_row, 0))
+        panel._on_expanded(skill_proxy)
+        skill_parent = panel.model.item(skill_row, 0)
+        for idx in range(8):
+            child_change = skill_parent.child(idx, 5)
+            self.assertEqual(child_change.text(), "")
+            self.assertIsNone(child_change.data(Qt.ForegroundRole))
+        self._dispose(panel)
+
+    def test_transfer_preview_dialog_flags_extra_files_and_clears_on_uncheck(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            target = root / "target"
+
+            # E/ride_idle: +2 -2（0 覆盖）
+            for rel in ("E/ride_idle/v2_001.png", "E/ride_idle/v2_002.png"):
+                (source / rel).parent.mkdir(parents=True, exist_ok=True)
+                (source / rel).write_bytes(b"new")
+            for rel in ("E/ride_idle/old_001.png", "E/ride_idle/old_002.png"):
+                (target / rel).parent.mkdir(parents=True, exist_ok=True)
+                (target / rel).write_bytes(b"old")
+
+            # SE/attack: ~1（仅覆盖，无多出）
+            (source / "SE/attack").mkdir(parents=True, exist_ok=True)
+            (target / "SE/attack").mkdir(parents=True, exist_ok=True)
+            (source / "SE/attack/a_001.png").write_bytes(b"new-a")
+            (target / "SE/attack/a_001.png").write_bytes(b"old-a")
+
+            # NE/skill: +1（全新动作，目标无该动作）
+            (source / "NE/skill").mkdir(parents=True, exist_ok=True)
+            (source / "NE/skill/s_001.png").write_bytes(b"new-s")
+
+            rel_paths = [
+                "E/ride_idle/v2_001.png",
+                "E/ride_idle/v2_002.png",
+                "SE/attack/a_001.png",
+                "NE/skill/s_001.png",
+            ]
+            action_map = {
+                "E/ride_idle/v2_001.png": "E/ride_idle",
+                "E/ride_idle/v2_002.png": "E/ride_idle",
+                "SE/attack/a_001.png": "SE/attack",
+                "NE/skill/s_001.png": "NE/skill",
+            }
+            statuses = {
+                "E/ride_idle": "different",
+                "SE/attack": "different",
+                "NE/skill": "only_left",
+            }
+
+            dialog = TransferPreviewDialog(
+                str(source),
+                str(target),
+                rel_paths,
+                action_map,
+                backup_enabled=True,
+                backup_dir="D:/Temp/Bak",
+                action_statuses=statuses,
+            )
+            dialog.show()
+            self.app.processEvents()
+
+            expected_red = dialog._extra_fg.name()
+            self.assertTrue(dialog.extra_warning_label.isVisibleTo(dialog))
+            self.assertIn("1 个已存在动作包含 2 个", dialog.extra_warning_label.text())
+            self.assertIn("比 SVN 多出", dialog.extra_warning_label.text())
+
+            groups = {
+                dialog.tree.topLevelItem(i).text(0): dialog.tree.topLevelItem(i)
+                for i in range(dialog.tree.topLevelItemCount())
+            }
+            ride_group = groups["ride_idle"]
+            self.assertEqual(ride_group.text(2), "2 个 · 多2")
+            self.assertEqual(ride_group.foreground(2).color().name(), expected_red)
+            self.assertTrue(ride_group.font(2).bold())
+            for i in range(2):
+                child = ride_group.child(i)
+                self.assertEqual(child.text(2), "新增 · 多出")
+                self.assertEqual(child.foreground(2).color().name(), expected_red)
+                self.assertTrue(child.font(2).bold())
+
+            attack_group = groups["attack"]
+            self.assertEqual(attack_group.text(2), "1 个文件")
+            self.assertIsNone(attack_group.data(2, Qt.ForegroundRole))
+            self.assertEqual(attack_group.child(0).text(2), "覆盖")
+            self.assertIsNone(attack_group.child(0).data(2, Qt.ForegroundRole))
+
+            skill_group = groups["skill"]
+            self.assertEqual(skill_group.text(2), "1 个文件")
+            self.assertIsNone(skill_group.data(2, Qt.ForegroundRole))
+            self.assertEqual(skill_group.child(0).text(2), "新增")
+            self.assertIsNone(skill_group.child(0).data(2, Qt.ForegroundRole))
+
+            # 取消勾选其中 1 个多出文件 -> 多1 同步更新
+            ride_group.child(0).setCheckState(0, Qt.Unchecked)
+            self.assertEqual(ride_group.text(2), "2 个 · 多1")
+            self.assertIn("1 个已存在动作包含 1 个", dialog.extra_warning_label.text())
+
+            # 全部取消该动作的多出文件 -> 恢复正常样式并隐藏警告条
+            ride_group.child(1).setCheckState(0, Qt.Unchecked)
+            self.assertEqual(ride_group.text(2), "2 个文件")
+            self.assertIsNone(ride_group.data(2, Qt.ForegroundRole))
+            self.assertIsNone(ride_group.data(2, Qt.FontRole))
+            self.assertEqual(ride_group.toolTip(2), "")
+            self.assertFalse(dialog.extra_warning_label.isVisibleTo(dialog))
+
+            # 重新勾选 -> 红色提醒立即恢复
+            ride_group.child(0).setCheckState(0, Qt.Checked)
+            self.assertEqual(ride_group.text(2), "2 个 · 多1")
+            self.assertEqual(ride_group.foreground(2).color().name(), expected_red)
+            self.assertTrue(dialog.extra_warning_label.isVisibleTo(dialog))
+
+            # 浅色独立窗口使用高对比度深红 #d32f2f
+            self.assertEqual(expected_red, "#d32f2f")
+
+            # 全不选 / 全选 按钮同样同步清理和恢复红色提示
+            dialog.clear_button.click()
+            self.assertEqual(ride_group.text(2), "2 个文件")
+            self.assertIsNone(ride_group.data(2, Qt.ForegroundRole))
+            self.assertIsNone(ride_group.data(2, Qt.FontRole))
+            self.assertFalse(dialog.extra_warning_label.isVisibleTo(dialog))
+            dialog.select_all_button.click()
+            self.assertEqual(ride_group.text(2), "2 个 · 多2")
+            self.assertEqual(ride_group.foreground(2).color().name(), expected_red)
+            self.assertTrue(dialog.extra_warning_label.isVisibleTo(dialog))
+            self._dispose(dialog)
+
+            # 大小写不敏感匹配：action_statuses 小写键应匹配目录大写键
+            ci_dialog = TransferPreviewDialog(
+                str(source),
+                str(target),
+                ["E/ride_idle/v2_001.png"],
+                {"e/ride_idle/v2_001.png": "E/ride_idle"},
+                action_statuses={"e/ride_idle": "different"},
+            )
+            ci_dialog.show()
+            self.app.processEvents()
+            self.assertTrue(ci_dialog.extra_warning_label.isVisibleTo(ci_dialog))
+            self.assertEqual(ci_dialog.tree.topLevelItem(0).child(0).text(2), "新增 · 多出")
+            self._dispose(ci_dialog)
+
+            # 图集条目：成对覆盖保持「覆盖」不标红；目标已有 .png 缺 .plist 时仅缺口 .plist 标红
+            (source / "boss_se_attack.png").write_bytes(b"new-atlas-png")
+            (source / "boss_se_attack.plist").write_text("<plist>new</plist>", encoding="utf-8")
+            (target / "boss_se_attack.png").write_bytes(b"old-atlas-png")
+            (target / "boss_se_attack.plist").write_text("<plist>old</plist>", encoding="utf-8")
+            atlas_paired_dialog = TransferPreviewDialog(
+                str(source),
+                str(target),
+                ["boss_se_attack.png", "boss_se_attack.plist"],
+                {
+                    "boss_se_attack.png": "boss_se_attack.png",
+                    "boss_se_attack.plist": "boss_se_attack.png",
+                },
+                action_statuses={"boss_se_attack.png": "different"},
+            )
+            atlas_paired_dialog.show()
+            self.app.processEvents()
+            self.assertFalse(atlas_paired_dialog.extra_warning_label.isVisibleTo(atlas_paired_dialog))
+            atlas_group = atlas_paired_dialog.tree.topLevelItem(0)
+            self.assertEqual(atlas_group.text(2), "2 个文件")
+            self.assertIsNone(atlas_group.data(2, Qt.ForegroundRole))
+            for idx in range(2):
+                self.assertEqual(atlas_group.child(idx).text(2), "覆盖")
+                self.assertIsNone(atlas_group.child(idx).data(2, Qt.ForegroundRole))
+            self._dispose(atlas_paired_dialog)
+
+            (target / "boss_se_attack.plist").unlink()
+            atlas_missing_plist_dialog = TransferPreviewDialog(
+                str(source),
+                str(target),
+                ["boss_se_attack.png"],
+                {"boss_se_attack.png": "boss_se_attack.png"},
+                action_statuses={"boss_se_attack.png": "different"},
+            )
+            atlas_missing_plist_dialog.show()
+            self.app.processEvents()
+            self.assertTrue(atlas_missing_plist_dialog.extra_warning_label.isVisibleTo(atlas_missing_plist_dialog))
+            atlas_partial = atlas_missing_plist_dialog.tree.topLevelItem(0)
+            self.assertEqual(atlas_partial.text(2), "2 个 · 多1")
+            by_name = {atlas_partial.child(i).text(0): atlas_partial.child(i) for i in range(2)}
+            self.assertEqual(by_name["boss_se_attack.png"].text(2), "覆盖")
+            self.assertEqual(by_name["boss_se_attack.plist"].text(2), "新增 · 多出")
+            self.assertEqual(
+                by_name["boss_se_attack.plist"].foreground(2).color().name(),
+                atlas_missing_plist_dialog._extra_fg.name(),
+            )
+            self._dispose(atlas_missing_plist_dialog)
+
+            # 不传 action_statuses 时，仅靠目标目录已有文件也能检出 +2 -2 多出情况
+            fallback_dialog = TransferPreviewDialog(
+                str(source),
+                str(target),
+                ["E/ride_idle/v2_001.png"],
+                {"E/ride_idle/v2_001.png": "E/ride_idle"},
+            )
+            fallback_dialog.show()
+            self.app.processEvents()
+            self.assertTrue(fallback_dialog.extra_warning_label.isVisibleTo(fallback_dialog))
+            self.assertEqual(fallback_dialog.tree.topLevelItem(0).child(0).text(2), "新增 · 多出")
+            self._dispose(fallback_dialog)
+
+            # 纯新增待传动作（无 action_statuses 且目标无目录）保持普通“新增”，不标红
+            new_only_dialog = TransferPreviewDialog(
+                str(source),
+                str(target),
+                ["NE/skill/s_001.png"],
+                {"NE/skill/s_001.png": "NE/skill"},
+            )
+            new_only_dialog.show()
+            self.app.processEvents()
+            self.assertFalse(new_only_dialog.extra_warning_label.isVisibleTo(new_only_dialog))
+            self.assertEqual(new_only_dialog.tree.topLevelItem(0).child(0).text(2), "新增")
+            self._dispose(new_only_dialog)
+
+    def test_main_controller_show_transfer_preview_passes_statuses_and_dark_theme(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            target = root / "target"
+            (source / "E/ride_idle").mkdir(parents=True)
+            (target / "E/ride_idle").mkdir(parents=True)
+            (source / "E/ride_idle/v2_001.png").write_bytes(b"new")
+            (target / "E/ride_idle/old_001.png").write_bytes(b"old")
+
+            diffs = [
+                FileDiffItem("E/ride_idle/v2_001.png", "v2_001.png", "only_left", str(source / "E/ride_idle/v2_001.png"), None, 3),
+                FileDiffItem("E/ride_idle/old_001.png", "old_001.png", "only_right", None, str(target / "E/ride_idle/old_001.png"), 3),
+            ]
+            action = ActionDiffItem("E/ride_idle", "ride_idle", "E/ride_idle", "different", None, None, diffs)
+
+            controller = MainController()
+            controller.state.left_root_path = str(source)
+            controller.state.right_root_path = str(target)
+            controller.state.action_items = [action]
+            controller.action_diff_panel.populate([action], {"E/ride_idle/v2_001.png"})
+            controller.state.selected_file_paths = {"E/ride_idle/v2_001.png"}
+
+            observed: dict[str, object] = {}
+
+            def inspect_and_reject() -> None:
+                modal = QApplication.activeModalWidget()
+                observed["is_dialog"] = isinstance(modal, TransferPreviewDialog)
+                if isinstance(modal, TransferPreviewDialog):
+                    observed["parent_is_ctrl"] = modal.parent() is controller
+                    observed["fg"] = modal._extra_fg.name()
+                    observed["visible"] = modal.extra_warning_label.isVisibleTo(modal)
+                    observed["status"] = modal.tree.topLevelItem(0).child(0).text(2)
+                    modal.reject()
+
+            QTimer.singleShot(0, inspect_and_reject)
+            controller.show_transfer_preview()
+
+            self.assertEqual(
+                observed,
+                {
+                    "is_dialog": True,
+                    "parent_is_ctrl": True,
+                    "fg": "#ff6b5e",
+                    "visible": True,
+                    "status": "新增 · 多出",
+                },
+            )
+            self._dispose(controller)
+
+    @classmethod
+    def _dispose(cls, widget) -> None:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            cls.app.processEvents()
+            threads = list(getattr(widget, "_active_threads", []) or []) + list(
+                getattr(widget, "_threads", []) or []
+            )
+            if all(_thread_settled(thread) for thread in threads):
+                break
+            time.sleep(0.01)
+        if getattr(widget, "_active_threads", None) or getattr(widget, "_threads", None):
+            QTimer.singleShot(0, lambda: UiWorkflowTests._dismiss_modal_question(widget))
+        widget.close()
+        widget.deleteLater()
+        cls.app.sendPostedEvents(None, QEvent.DeferredDelete)
+        cls.app.processEvents()
 
 
 if __name__ == "__main__":

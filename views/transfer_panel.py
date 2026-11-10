@@ -21,6 +21,7 @@ class TransferPanel(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._busy = False
+        self._has_selection = False
         self._current_file = ""
         self._current_percent = 0
         layout = QVBoxLayout(self)
@@ -67,14 +68,15 @@ class TransferPanel(QWidget):
         self.details_button.toggled.connect(self.log.setVisible)
 
     def set_selection_summary(self, action_count: int, file_count: int, size_bytes: int) -> None:
+        self._has_selection = bool(file_count)
         if not file_count:
             self.selection_label.setText("未选择任何文件")
         else:
             self.selection_label.setText(
                 f"已选 {action_count} 个动作 · {file_count} 个文件 · {self._format_size(size_bytes)}"
             )
-        self.transfer_button.setEnabled(bool(file_count) and not self._busy)
-        self.clear_button.setEnabled(bool(file_count) and not self._busy)
+        self.transfer_button.setEnabled(self._has_selection and not self._busy)
+        self.clear_button.setEnabled(self._has_selection and not self._busy)
 
     def append_log(self, message: str, level: str | None = None) -> None:
         timestamp = QTime.currentTime().toString("HH:mm:ss")
@@ -99,8 +101,8 @@ class TransferPanel(QWidget):
 
     def set_transfer_enabled(self, enabled: bool) -> None:
         self._busy = not enabled
-        self.transfer_button.setEnabled(enabled and "已选" in self.selection_label.text())
-        self.clear_button.setEnabled(enabled and "已选" in self.selection_label.text())
+        self.transfer_button.setEnabled(enabled and self._has_selection)
+        self.clear_button.setEnabled(enabled and self._has_selection)
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -128,22 +130,27 @@ class TransferPanel(QWidget):
     def set_stats(self, success: int, failed: int, skipped: int) -> None:
         self.status_label.setText(f"成功 {success} · 失败 {failed} · 跳过 {skipped}")
 
-    def set_progress(self, current: int, total: int) -> None:
+    def set_progress(self, current: int, total: int, prefix: str = "总进度") -> None:
         self.total_progress.setRange(0, max(1, total))
         self.total_progress.setValue(current)
-        self.total_progress.setFormat(f"总进度 {current}/{total}")
+        self.total_progress.setFormat(f"{prefix} {current}/{total}")
 
     def reset_progress(self) -> None:
         self.total_progress.setRange(0, 1)
         self.total_progress.setValue(0)
         self.total_progress.setVisible(False)
         self.status_label.clear()
+        self._current_file = ""
+        self._current_percent = 0
         self._busy = False
 
     def reset_actions(self) -> None:
         self.selection_label.setText("未选择任何文件")
         self.status_label.clear()
         self.log.clear()
+        self._has_selection = False
+        self._current_file = ""
+        self._current_percent = 0
         self.transfer_button.setEnabled(False)
         self.clear_button.setEnabled(False)
 

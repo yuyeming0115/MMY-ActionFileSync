@@ -20,6 +20,7 @@ if HAS_QT:
     from PIL import Image
 
     from controllers.main_controller import MainController
+    from utils.app_info import create_app_settings
     from utils.path_matcher import normalize_path
     from utils.pinned_paths import DEFAULT_PINNED_TARGET_PATHS
 
@@ -49,21 +50,23 @@ class PinnedTargetUiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.settings_dir = tempfile.TemporaryDirectory()
+        cls._prev_format = QSettings.defaultFormat()
         QSettings.setDefaultFormat(QSettings.IniFormat)
         QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, cls.settings_dir.name)
         cls.app = QApplication.instance() or QApplication([])
 
     @classmethod
     def tearDownClass(cls) -> None:
+        QSettings.setDefaultFormat(cls._prev_format)
         cls.settings_dir.cleanup()
 
     def setUp(self) -> None:
-        settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        settings = create_app_settings()
         settings.clear()
         settings.sync()
 
     def tearDown(self) -> None:
-        settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        settings = create_app_settings()
         settings.clear()
         settings.sync()
 
@@ -249,7 +252,7 @@ class PinnedTargetUiTests(unittest.TestCase):
             self._dispose(after_empty)
 
             # QSettings 键被清除或损坏时应安全回落为 3 个默认目录
-            settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+            settings = create_app_settings()
             settings.remove("paths/pinned_target_json")
             settings.sync()
             reset_defaults = MainController()

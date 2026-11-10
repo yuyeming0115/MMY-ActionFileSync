@@ -1,8 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import os
 import stat
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -45,26 +46,81 @@ class TransferService:
             )
         return TransferJob(items=items)
 
-    @staticmethod
-    def _expand_atlas_pairs(left_root: Path, relative_paths: list[str]) -> set[str]:
-        """把勾选的图集文件补全为成对集合。"""
-        expanded: set[str] = set(relative_paths)
+    @classmethod
+    def expand_atlas_paths(cls, left_root: str | Path, relative_paths: list[str]) -> list[str]:
+        """按来源目录展开图集伴随文件，返回去重排序后的相对路径列表。"""
+        left = Path(left_root).resolve()
+        return sorted(cls._expand_atlas_pairs(left, relative_paths))
+
+    @classmethod
+    def _expand_atlas_pairs(cls, left_root: Path, relative_paths: list[str]) -> set[str]:
+        """把勾选的图集文件补全为成对集合（兼容扩展名大小写）。"""
+        expanded: set[str] = set()
+        seen_keys: set[str] = set()
+        dir_entries: dict[Path, dict[str, str]] = {}
+        case_insensitive = os.name == "nt" or sys.platform == "darwin"
+
+        def _record(rel_text: str) -> None:
+            key = rel_text.casefold() if case_insensitive else rel_text
+            if key in seen_keys:
+                return
+            seen_keys.add(key)
+            expanded.add(rel_text)
+
+        def _entries_for(parent_dir: Path | None) -> dict[str, str]:
+            if parent_dir is None:
+                return {}
+            cached = dir_entries.get(parent_dir)
+            if cached is None:
+                try:
+                    cached = {
+                        entry.name.casefold(): entry.name
+                        for entry in os.scandir(parent_dir)
+                        if entry.is_file()
+                    }
+                except OSError:
+                    cached = {}
+                dir_entries[parent_dir] = cached
+            return cached
+
         for relative_path in relative_paths:
-            name = Path(relative_path).name
+            raw_rel = (relative_path or "").replace("\\", "/")
+            if not raw_rel.strip():
+                continue
+            rel_obj = Path(raw_rel)
+            if rel_obj.is_absolute() or rel_obj.drive or rel_obj.root:
+                continue
+            rel_posix = rel_obj.as_posix()
+            if not rel_posix or rel_posix == ".":
+                continue
+            if cls._safe_join(left_root, rel_posix) is None:
+                continue
+
+            parent = rel_obj.parent
+            parent_dir = left_root if parent == Path(".") else cls._safe_join(left_root, parent.as_posix())
+            entries = _entries_for(parent_dir)
+            actual_self = entries.get(rel_obj.name.casefold(), rel_obj.name)
+            _record((parent / actual_self).as_posix())
+
+            name = rel_obj.name
             lower = name.lower()
             if lower.endswith(ATLAS_PNG):
                 stem = name[: -len(ATLAS_PNG)]
+                self_ext, partner_ext = ATLAS_PNG, ATLAS_PLIST
             elif lower.endswith(ATLAS_PLIST):
                 stem = name[: -len(ATLAS_PLIST)]
+                self_ext, partner_ext = ATLAS_PLIST, ATLAS_PNG
             else:
                 continue
-            png_name = f"{stem}{ATLAS_PNG}"
-            plist_name = f"{stem}{ATLAS_PLIST}"
-            # 只有当同名 png+plist 都存在于来源时才算图集条目，才做补全
-            if not ((left_root / png_name).is_file() and (left_root / plist_name).is_file()):
+
+            self_actual = entries.get(f"{stem}{self_ext}".casefold())
+            partner_actual = entries.get(f"{stem}{partner_ext}".casefold())
+            if self_actual is None or partner_actual is None:
                 continue
-            expanded.add((Path(relative_path).parent / plist_name).as_posix())
-            expanded.add((Path(relative_path).parent / png_name).as_posix())
+            partner_rel = (parent / partner_actual).as_posix()
+            if cls._safe_join(left_root, partner_rel) is None:
+                continue
+            _record(partner_rel)
         return expanded
 
     def build_job_for_node(self, left_root: str, right_root: str, relative_paths: list[str]) -> TransferJob:

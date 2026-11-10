@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QThread
+from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from services.redundancy_service import MoveOutcome, RedundancyItem
+from utils.app_info import create_app_settings
 from utils.cancel_token import CancellationToken
 from views.source_target_bar import DropPathEdit
 from workers.redundancy_worker import RedundancyMoveWorker, RedundancyScanWorker
@@ -38,7 +39,7 @@ class RedundancyDialog(QDialog):
 
     def __init__(self, default_root: str = "", parent=None) -> None:
         super().__init__(parent)
-        self.settings = QSettings("MMY-Tools", "MMY-ActionFileSync")
+        self.settings = create_app_settings()
         self.setWindowTitle("冗余帧扫描")
         self.resize(1020, 640)
         self._items: list[RedundancyItem] = []

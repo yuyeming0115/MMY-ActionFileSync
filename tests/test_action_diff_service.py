@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from models.action_diff import ActionDiffItem, FileDiffItem
 from models.tree_node import TreeNode
 from services.action_diff_service import ActionDiffService
 from services.compare_service import CompareService
@@ -124,6 +125,82 @@ class ActionDiffServiceTests(unittest.TestCase):
             actions = ActionDiffService().build_actions(result)
 
             self.assertEqual([action.action_name for action in actions], ["action2", "action10"])
+
+    def test_action_diff_item_flags_extra_source_files_on_existing_target(self) -> None:
+        def f(name: str, status: str) -> FileDiffItem:
+            return FileDiffItem(
+                f"dir/{name}",
+                name,
+                status,
+                f"src/{name}" if status != "only_right" else None,
+                f"dst/{name}" if status != "only_left" else None,
+                100,
+            )
+
+        # +8 -8（内容变更且未覆盖同名文件，多出 8 个来源文件）-> True
+        extra_replace = ActionDiffItem(
+            "e/ride_idle",
+            "ride_idle",
+            "E/ride_idle",
+            "different",
+            None,
+            None,
+            [f(f"v2_{i}.png", "only_left") for i in range(8)]
+            + [f(f"old_{i}.png", "only_right") for i in range(8)],
+        )
+        self.assertEqual(extra_replace.change_summary, "+8 -8")
+        self.assertEqual(extra_replace.only_left_count, 8)
+        self.assertTrue(extra_replace.adds_extra_to_existing_target)
+
+        # +2 ~6（内容变更且既有覆盖又多出 2 个文件）-> True
+        mixed_extra = ActionDiffItem(
+            "se/idle",
+            "idle",
+            "SE/idle",
+            "different",
+            None,
+            None,
+            [f(f"c_{i}.png", "different") for i in range(6)]
+            + [f(f"add_{i}.png", "only_left") for i in range(2)],
+        )
+        self.assertEqual(mixed_extra.change_summary, "+2 ~6")
+        self.assertTrue(mixed_extra.adds_extra_to_existing_target)
+
+        # ~8 / ~7 -1（仅覆盖或少文件，不会比 SVN 多出）-> False
+        overwrite_only = ActionDiffItem(
+            "se/attack",
+            "attack",
+            "SE/attack",
+            "different",
+            None,
+            None,
+            [f(f"a_{i}.png", "different") for i in range(8)],
+        )
+        fewer_files = ActionDiffItem(
+            "w/hurt",
+            "hurt",
+            "W/hurt",
+            "different",
+            None,
+            None,
+            [f(f"h_{i}.png", "different") for i in range(7)] + [f("h_8.png", "only_right")],
+        )
+        self.assertFalse(overwrite_only.adds_extra_to_existing_target)
+        self.assertFalse(fewer_files.adds_extra_to_existing_target)
+
+        # 新增待传 (+8) 与已一致 (0) -> False
+        brand_new = ActionDiffItem(
+            "ne/skill",
+            "skill",
+            "NE/skill",
+            "only_left",
+            None,
+            None,
+            [f(f"s_{i}.png", "only_left") for i in range(8)],
+        )
+        same_action = ActionDiffItem("s/walk", "walk", "S/walk", "same", None, None, [f("w_1.png", "same")])
+        self.assertFalse(brand_new.adds_extra_to_existing_target)
+        self.assertFalse(same_action.adds_extra_to_existing_target)
 
 
 if __name__ == "__main__":
