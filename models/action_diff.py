@@ -16,10 +16,26 @@ class FileDiffItem:
     source_path: str | None
     target_path: str | None
     size_bytes: int = 0
+    target_relative_path: str = ""
+    blocked_reason: str = ""
+    source_dimensions: tuple[int, int] | None = None
+    target_dimensions: tuple[int, int] | None = None
+
+    @property
+    def resolved_target_relative_path(self) -> str:
+        return self.target_relative_path or self.relative_path
+
+    @property
+    def has_dimension_mismatch(self) -> bool:
+        return bool(
+            self.source_dimensions
+            and self.target_dimensions
+            and self.source_dimensions != self.target_dimensions
+        )
 
     @property
     def is_transferable(self) -> bool:
-        return bool(self.source_path) and self.status in TRANSFERABLE_STATUSES
+        return bool(self.source_path) and self.status in TRANSFERABLE_STATUSES and not self.blocked_reason
 
 
 @dataclass
@@ -31,6 +47,33 @@ class ActionDiffItem:
     source_node: TreeNode | None
     target_node: TreeNode | None
     file_diffs: list[FileDiffItem] = field(default_factory=list)
+
+    @property
+    def has_dimension_mismatch(self) -> bool:
+        return any(item.has_dimension_mismatch for item in self.file_diffs)
+
+    @property
+    def dimension_mismatch_pair(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        for item in self.file_diffs:
+            if item.has_dimension_mismatch and item.source_dimensions and item.target_dimensions:
+                return (item.source_dimensions, item.target_dimensions)
+        return None
+
+    @property
+    def blocked_reasons(self) -> list[str]:
+        seen: list[str] = []
+        for item in self.file_diffs:
+            if item.blocked_reason and item.blocked_reason not in seen:
+                seen.append(item.blocked_reason)
+        return seen
+
+    @property
+    def candidate_target_paths(self) -> list[str]:
+        if self.source_node and self.source_node.extra:
+            raw = self.source_node.extra.get("candidate_targets")
+            if isinstance(raw, list):
+                return [str(p) for p in raw if p]
+        return []
 
     @property
     def transferable_files(self) -> list[FileDiffItem]:

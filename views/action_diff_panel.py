@@ -6,11 +6,13 @@ from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QTreeView,
     QVBoxLayout,
@@ -32,6 +34,7 @@ STATUS_LABELS = {
     "different": "内容变更",
     "same": "已一致",
     "only_right": "目标独有",
+    "conflict": "重名冲突",
     "unknown": "无法判断",
 }
 
@@ -40,10 +43,12 @@ STATUS_FOREGROUND = {
     "different": QColor("#e0a040"),
     "same": QColor("#4caf50"),
     "only_right": QColor("#b985d9"),
+    "conflict": QColor("#ff6b5e"),
     "unknown": QColor("#96A1AD"),
 }
 
 EXTRA_TO_TARGET_FOREGROUND = QColor("#ff6b5e")
+DIMENSION_MISMATCH_FOREGROUND = QColor("#ff9800")
 
 ACTION_HIGHLIGHT_STATUSES = ("only_left", "different")
 
@@ -101,6 +106,7 @@ class ActionDiffPanel(QWidget):
     action_selected = Signal(str)
     selection_changed = Signal(object)
     jump_filter_relaxed = Signal(str)
+    conflict_target_selected = Signal(str, str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -111,6 +117,7 @@ class ActionDiffPanel(QWidget):
         self._current_action_path = ""
         # 本次是否因「待更新为空」自动放宽到了「全部」过滤
         self._auto_relaxed = False
+        self._ui_mode = False
         self.filter_buttons: dict[str, QPushButton] = {}
 
         layout = QVBoxLayout(self)
@@ -118,11 +125,11 @@ class ActionDiffPanel(QWidget):
         layout.setSpacing(6)
 
         title_row = QHBoxLayout()
-        title = QLabel("动作差异清单")
-        title.setProperty("sectionTitle", True)
+        self.title_label = QLabel("动作差异清单")
+        self.title_label.setProperty("sectionTitle", True)
         self.visible_label = QLabel("尚未扫描")
         self.visible_label.setProperty("secondaryText", True)
-        title_row.addWidget(title)
+        title_row.addWidget(self.title_label)
         title_row.addStretch(1)
         title_row.addWidget(self.visible_label)
 
@@ -134,6 +141,7 @@ class ActionDiffPanel(QWidget):
             ("待更新", "transfer"),
             ("新增", "only_left"),
             ("内容变更", "different"),
+            ("冲突", "conflict"),
             ("已一致", "same"),
             ("全部", "all"),
         ]:
@@ -144,6 +152,8 @@ class ActionDiffPanel(QWidget):
             button.setProperty("baseLabel", label)
             if value == "transfer":
                 button.setChecked(True)
+            if value == "conflict":
+                button.setVisible(False)
             self.filter_group.addButton(button)
             self.filter_buttons[value] = button
             filter_row.addWidget(button)
@@ -207,9 +217,39 @@ class ActionDiffPanel(QWidget):
         self.view.expanded.connect(self._on_expanded)
         self.view.selectionModel().currentChanged.connect(self._on_current_changed)
         self.view.clicked.connect(self._on_clicked)
+        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._show_context_menu)
         self.toggle_selection_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self.view)
         self.toggle_selection_shortcut.setContext(Qt.WidgetShortcut)
         self.toggle_selection_shortcut.activated.connect(self.toggle_highlighted)
+
+    def set_ui_mode(self, enabled: bool) -> None:
+        self._ui_mode = enabled
+        self.title_label.setText("UI 资源差异清单" if enabled else "动作差异清单")
+        self.search_edit.setPlaceholderText(
+            "搜索文件名、来源路径或目标路径" if enabled else "搜索动作或相对路径"
+        )
+        headers = (
+            ["选择", "方向", "目标位置", "文件", "状态", "变化", "大小"]
+            if enabled
+            else ["选择", "方向", "目录", "动作", "状态", "变化", "大小"]
+        )
+        self.model.setHorizontalHeaderLabels(headers)
+        if enabled:
+            self._rebuild_direction_buttons()
+            self._rebuild_action_buttons()
+        self._sync_conflict_filter_visibility()
+        self._update_visible_label()
+
+    def _sync_conflict_filter_visibility(self) -> None:
+        conflict_btn = self.filter_buttons.get("conflict")
+        if conflict_btn is None:
+            return
+        has_conflicts = any(action.status == "conflict" for action in self.actions)
+        should_show = self._ui_mode or has_conflicts
+        conflict_btn.setVisible(should_show)
+        if not should_show and self.proxy.status_filter == "conflict":
+            self._apply_status_filter("transfer")
 
     def populate(self, actions: list[ActionDiffItem], selected_paths: set[str] | None = None) -> None:
         previous_path = self._current_action_path
@@ -406,6 +446,10 @@ class ActionDiffPanel(QWidget):
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
+        if self._ui_mode:
+            self.direction_buttons_row.setVisible(False)
+            self.direction_buttons_row.sync_height()
+            return
         directions = sorted(
             {direction for direction in (self._direction_of(action) for action in self.actions) if direction}
         )
@@ -483,6 +527,11 @@ class ActionDiffPanel(QWidget):
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
+        if self._ui_mode:
+            self.action_buttons_row.setVisible(False)
+            self.action_buttons_row.sync_height()
+            return
+        self.action_buttons_row.setVisible(True)
         seen: list[str] = []
         for action in self.actions:
             # 图集条目的 action_name 是完整文件名，直接用作按钮名会生成
@@ -601,14 +650,26 @@ class ActionDiffPanel(QWidget):
         selection_item.setData("action", ROLE_KIND)
         selection_item.setData(action, ROLE_OBJECT)
         selection_item.setData(action.status, ROLE_STATUS)
-        atlas_node = action.source_node or action.target_node
-        atlas_extra = getattr(atlas_node, "extra", None) or {}
-        # 图集条目额外把角色ID/部件/方向/动作纳入搜索，便于「按角色筛」
-        search_text = (
-            str(atlas_extra["search_text"])
-            if atlas_extra.get("layout") == "atlas" and atlas_extra.get("search_text")
-            else f"{action.action_name} {action.relative_path}"
-        )
+        primary_node = action.source_node or action.target_node
+        node_extra = getattr(primary_node, "extra", None) or {}
+        is_ui = node_extra.get("layout") == "ui"
+
+        if is_ui:
+            display_rel = str(node_extra.get("display_relative_path") or action.relative_path)
+            target_rel = str(node_extra.get("target_relative_path") or display_rel)
+            search_parts = [action.action_name, display_rel, target_rel]
+            if action.has_dimension_mismatch:
+                search_parts.append("尺寸")
+            if action.status == "conflict":
+                search_parts.append("冲突")
+            search_text = " ".join(part for part in search_parts if part)
+        else:
+            # 图集条目额外把角色ID/部件/方向/动作纳入搜索，便于「按角色筛」
+            search_text = (
+                str(node_extra["search_text"])
+                if node_extra.get("layout") == "atlas" and node_extra.get("search_text")
+                else f"{action.action_name} {action.relative_path}"
+            )
         selection_item.setData(search_text, ROLE_SEARCH)
         selection_item.setData(action.transfer_file_count > 0, ROLE_TRANSFERABLE)
         if action.transfer_file_count:
@@ -633,23 +694,72 @@ class ActionDiffPanel(QWidget):
 
         direction_item = QStandardItem(self._direction_prefix(action))
         direction_item.setTextAlignment(Qt.AlignCenter)
-        atlas_columns = self._atlas_columns(action)
-        if atlas_columns:
-            group_text, action_text = atlas_columns
+        if is_ui:
+            display_rel = str(node_extra.get("display_relative_path") or action.relative_path)
+            target_rel = str(node_extra.get("target_relative_path") or display_rel)
+            candidates = action.candidate_target_paths
+            if action.status == "conflict":
+                group_text = "来源重名冲突" if node_extra.get("source_collision") else f"冲突 ({len(candidates)} 个同名)"
+            else:
+                target_parent = PurePosixPath(target_rel).parent.as_posix()
+                group_text = "根目录" if target_parent == "." else target_parent
+                if node_extra.get("manual_override"):
+                    group_text = f"📌 {group_text}"
+            action_text = action.action_name
+            tooltip_lines = [f"来源: {display_rel}"]
+            if target_rel:
+                tooltip_lines.append(f"目标: {target_rel}")
+            if candidates:
+                tooltip_lines.append("候选目标: " + ", ".join(candidates[:5]))
+            row_tooltip = "\n".join(tooltip_lines)
         else:
-            group_text, action_text = self._split_action_path(action.relative_path)
+            atlas_columns = self._atlas_columns(action)
+            if atlas_columns:
+                group_text, action_text = atlas_columns
+            else:
+                group_text, action_text = self._split_action_path(action.relative_path)
+            row_tooltip = action.relative_path
+
         group_item = QStandardItem(group_text)
-        group_item.setToolTip(action.relative_path)
+        group_item.setToolTip(row_tooltip)
         action_item = QStandardItem(action_text)
-        action_item.setToolTip(action.relative_path)
+        action_item.setToolTip(row_tooltip)
+
+        blocked_reasons = action.blocked_reasons
         status_color = STATUS_FOREGROUND.get(action.status, QColor("#96A1AD"))
-        if action.status in ACTION_HIGHLIGHT_STATUSES:
+        if is_ui and action.status == "only_left" and blocked_reasons:
+            status_text = "新增(已拦截)"
+            status_color = QColor("#96A1AD")
+        else:
+            status_text = STATUS_LABELS.get(action.status, action.status)
+        if action.status in ACTION_HIGHLIGHT_STATUSES and not (is_ui and blocked_reasons):
             action_item.setForeground(status_color)
-        status_item = QStandardItem(STATUS_LABELS.get(action.status, action.status))
+        elif action.status == "conflict":
+            action_item.setForeground(status_color)
+        status_item = QStandardItem(status_text)
         status_item.setData(action, ROLE_OBJECT)
         status_item.setForeground(status_color)
+        if blocked_reasons:
+            status_item.setToolTip("\n".join(blocked_reasons))
+
         change_item = QStandardItem(action.change_summary)
-        if action.adds_extra_to_existing_target:
+        mismatch_pair = action.dimension_mismatch_pair if is_ui else None
+        if mismatch_pair is not None:
+            (sw, sh), (tw, th) = mismatch_pair
+            change_item.setText("⚠ 尺寸变")
+            change_item.setForeground(DIMENSION_MISMATCH_FOREGROUND)
+            bold_font = QFont(self.view.font())
+            bold_font.setBold(True)
+            change_item.setFont(bold_font)
+            change_item.setToolTip(f"尺寸不一致预警：来源 {sw}×{sh} ≠ 目标 {tw}×{th}")
+        elif is_ui and action.status == "conflict":
+            change_item.setText("!")
+            change_item.setForeground(STATUS_FOREGROUND["conflict"])
+            if blocked_reasons:
+                change_item.setToolTip("\n".join(blocked_reasons))
+        elif is_ui and not node_extra.get("is_image", True):
+            change_item.setToolTip("非图片文件")
+        elif not is_ui and action.adds_extra_to_existing_target:
             counts = action.change_counts
             extra_count = counts["only_left"]
             right_only_count = counts["only_right"]
@@ -666,7 +776,10 @@ class ActionDiffPanel(QWidget):
                 change_item.setToolTip(
                     f"强提示：SVN 目标已有该动作，来源多出 {extra_count} 个文件，传输后会比 SVN 多出 {extra_count} 个文件。"
                 )
-        size_item = QStandardItem(self._format_size(action.transfer_size_bytes))
+        display_bytes = action.transfer_size_bytes
+        if display_bytes == 0 and is_ui and action.file_diffs:
+            display_bytes = action.file_diffs[0].size_bytes
+        size_item = QStandardItem(self._format_size(display_bytes))
         size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         if action.status == "same":
             for it in (direction_item, group_item, action_item, status_item, change_item, size_item):
@@ -688,12 +801,28 @@ class ActionDiffPanel(QWidget):
         file_item = QStandardItem(item.name)
         file_item.setToolTip(item.relative_path)
         status_color = STATUS_FOREGROUND.get(item.status, QColor("#96A1AD"))
-        if item.status in ACTION_HIGHLIGHT_STATUSES:
+        if item.status == "only_left" and item.blocked_reason:
+            status_text = "新增(已拦截)"
+            status_color = QColor("#96A1AD")
+        else:
+            status_text = STATUS_LABELS.get(item.status, item.status)
+        if item.status in ACTION_HIGHLIGHT_STATUSES and not item.blocked_reason:
             file_item.setForeground(status_color)
-        status_item = QStandardItem(STATUS_LABELS.get(item.status, item.status))
+        status_item = QStandardItem(status_text)
         status_item.setForeground(status_color)
+        if item.blocked_reason:
+            status_item.setToolTip(item.blocked_reason)
         change_item = QStandardItem()
-        if parent_adds_extra and item.status == "only_left":
+        if item.has_dimension_mismatch and item.source_dimensions and item.target_dimensions:
+            sw, sh = item.source_dimensions
+            tw, th = item.target_dimensions
+            change_item.setText("⚠ 尺寸变")
+            change_item.setForeground(DIMENSION_MISMATCH_FOREGROUND)
+            bold_font = QFont(self.view.font())
+            bold_font.setBold(True)
+            change_item.setFont(bold_font)
+            change_item.setToolTip(f"尺寸不一致预警：来源 {sw}×{sh} ≠ 目标 {tw}×{th}")
+        elif parent_adds_extra and item.status == "only_left":
             change_item.setText("+1")
             change_item.setForeground(EXTRA_TO_TARGET_FOREGROUND)
             bold_font = QFont(self.view.font())
@@ -794,7 +923,8 @@ class ActionDiffPanel(QWidget):
         self._update_visible_label()
 
     def _update_visible_label(self) -> None:
-        text = f"{self.proxy.rowCount()} 个可见动作"
+        unit = "个可见资源" if self._ui_mode else "个可见动作"
+        text = f"{self.proxy.rowCount()} {unit}"
         if self._auto_relaxed:
             text = f"{text}（无待更新，已显示全部）"
         self.visible_label.setText(text)
@@ -804,11 +934,60 @@ class ActionDiffPanel(QWidget):
             "transfer": sum(action.transfer_file_count > 0 for action in self.actions),
             "only_left": sum(action.status == "only_left" for action in self.actions),
             "different": sum(action.status == "different" for action in self.actions),
+            "conflict": sum(action.status == "conflict" for action in self.actions),
             "same": sum(action.status == "same" for action in self.actions),
             "all": len(self.actions),
         }
         for value, button in self.filter_buttons.items():
             button.setText(f"{button.property('baseLabel')} {counts[value]}")
+        self._sync_conflict_filter_visibility()
+
+    def _show_context_menu(self, pos) -> None:
+        proxy_index = self.view.indexAt(pos)
+        if not proxy_index.isValid():
+            return
+        source_index = self.proxy.mapToSource(proxy_index.siblingAtColumn(0))
+        while source_index.parent().isValid():
+            source_index = source_index.parent()
+        action = source_index.data(ROLE_OBJECT)
+        if not isinstance(action, ActionDiffItem):
+            return
+        primary_node = action.source_node or action.target_node
+        extra = getattr(primary_node, "extra", None) or {}
+        if extra.get("layout") != "ui":
+            return
+
+        menu = QMenu(self)
+        candidates = action.candidate_target_paths
+        if candidates:
+            for cand in candidates:
+                menu.addAction(
+                    f"覆盖到 → {cand}",
+                    lambda checked=False, s=action.relative_path, t=cand: self.conflict_target_selected.emit(s, t),
+                )
+            menu.addSeparator()
+        if extra.get("manual_override"):
+            menu.addAction(
+                "取消手动指定目标",
+                lambda checked=False, s=action.relative_path: self.conflict_target_selected.emit(s, ""),
+            )
+            menu.addSeparator()
+
+        display_rel = str(extra.get("display_relative_path") or action.relative_path)
+        target_rel = str(extra.get("target_relative_path") or "")
+        menu.addAction(
+            "复制来源相对路径",
+            lambda checked=False, text=display_rel: QApplication.clipboard().setText(text),
+        )
+        if target_rel:
+            menu.addAction(
+                "复制目标相对路径",
+                lambda checked=False, text=target_rel: QApplication.clipboard().setText(text),
+            )
+        try:
+            menu.exec(self.view.viewport().mapToGlobal(pos))
+        finally:
+            menu.deleteLater()
 
     def _on_current_changed(self, current, _previous) -> None:
         self._emit_action(current)

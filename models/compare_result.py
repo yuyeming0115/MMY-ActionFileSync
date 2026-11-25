@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from models.tree_node import TreeNode
 
@@ -11,6 +12,7 @@ class ComparePair:
     left: TreeNode | None
     right: TreeNode | None
     status: str
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

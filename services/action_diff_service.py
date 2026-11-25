@@ -5,6 +5,7 @@ import re
 
 from models.action_diff import ActionDiffItem, FileDiffItem
 from models.compare_result import ComparePair, CompareResult
+from models.sync_options import SyncOptions
 from models.tree_node import TreeNode
 from utils.hash_utils import HashCache, files_equal, fingerprints_equal
 
@@ -20,7 +21,26 @@ class ActionDiffService:
         # 打开后对「字节数相同」的图集做完整内容哈希，精度更高但慢。
         self._deep_verify = deep_verify
 
-    def build_actions(self, result: CompareResult) -> list[ActionDiffItem]:
+    def build_actions(
+        self,
+        result: CompareResult,
+        *,
+        sync_options: SyncOptions | None = None,
+    ) -> list[ActionDiffItem]:
+        if self._is_ui_result(result):
+            actions = [
+                self._build_ui_action(pair, sync_options=sync_options)
+                for pair in result.node_map.values()
+                if self._is_ui_node(pair.left) or self._is_ui_node(pair.right)
+            ]
+            return sorted(
+                actions,
+                key=lambda item: (
+                    self._natural_key(item.action_name),
+                    self._natural_key(item.relative_path),
+                ),
+            )
+
         action_paths = self._collect_sequence_paths(result.left_root)
         action_paths.update(self._collect_sequence_paths(result.right_root))
 
@@ -193,6 +213,77 @@ class ActionDiffService:
     @staticmethod
     def _is_atlas_node(node: TreeNode | None) -> bool:
         return bool(node and node.node_type == "atlas")
+
+    @staticmethod
+    def _is_ui_node(node: TreeNode | None) -> bool:
+        return bool(node and node.node_type == "ui_asset")
+
+    @staticmethod
+    def _is_ui_result(result: CompareResult) -> bool:
+        return result.left_root.node_type == "ui_root" or result.right_root.node_type == "ui_root"
+
+    def _build_ui_action(
+        self,
+        pair: ComparePair,
+        *,
+        sync_options: SyncOptions | None = None,
+    ) -> ActionDiffItem:
+        source_node = pair.left
+        target_node = pair.right
+        status = pair.status
+        pair_extra = dict(pair.extra or {})
+        display_rel = str(pair_extra.get("display_relative_path") or pair.relative_path)
+        target_rel = str(pair_extra.get("target_relative_path") or display_rel)
+        action_name = Path(display_rel).name
+
+        blocked_reason = ""
+        if status == "conflict":
+            blocked_reason = str(pair_extra.get("conflict_reason") or "重名冲突，请右键指定覆盖目标")
+        elif status == "only_left" and sync_options is not None and sync_options.ui_overwrite_only:
+            blocked_reason = "仅覆盖模式：目标无同名文件，已拦截新增"
+
+        # 把比对阶段的映射/冲突/拦截信息同步挂到主节点 extra，方便清单和菜单读取
+        primary_node = source_node or target_node
+        if primary_node is not None:
+            merged_extra = dict(primary_node.extra or {})
+            merged_extra.update(pair_extra)
+            merged_extra["layout"] = "ui"
+            if blocked_reason:
+                merged_extra["blocked_reason"] = blocked_reason
+            else:
+                merged_extra.pop("blocked_reason", None)
+            primary_node.extra = merged_extra
+
+        size_bytes = (
+            source_node.file_size_bytes
+            if source_node is not None
+            else target_node.file_size_bytes
+            if target_node is not None
+            else 0
+        )
+        src_dim = pair_extra.get("source_dimensions")
+        dst_dim = pair_extra.get("target_dimensions")
+        file_diff = FileDiffItem(
+            relative_path=pair.relative_path,
+            name=action_name,
+            status=status,
+            source_path=source_node.absolute_path if source_node else None,
+            target_path=target_node.absolute_path if target_node else None,
+            size_bytes=size_bytes,
+            target_relative_path=target_rel,
+            blocked_reason=blocked_reason,
+            source_dimensions=src_dim if isinstance(src_dim, tuple) else None,
+            target_dimensions=dst_dim if isinstance(dst_dim, tuple) else None,
+        )
+        return ActionDiffItem(
+            action_id=pair.relative_path.casefold(),
+            action_name=action_name,
+            relative_path=pair.relative_path,
+            status=status,
+            source_node=source_node,
+            target_node=target_node,
+            file_diffs=[file_diff],
+        )
 
     def _collect_file_diffs(self, action_path: str, result: CompareResult) -> list[FileDiffItem]:
         # node_map 的 key 是 casefold 的，用 casefold prefix 匹配；

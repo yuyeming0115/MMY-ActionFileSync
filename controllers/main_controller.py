@@ -9,6 +9,13 @@ from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 
 from models.app_state import AppState
 from models.preview_item import PreviewItem
+from models.sync_options import (
+    SYNC_MODE_AUTO,
+    SYNC_MODE_UI,
+    SyncOptions,
+    UI_MATCH_FILENAME,
+    UI_MATCH_RELATIVE,
+)
 from services.action_diff_service import ActionDiffService
 from services.backup_service import BackupService, default_backup_dir
 from services.transfer_service import TransferService
@@ -72,9 +79,11 @@ class MainController(MainWindow):
         )
         self.source_target_bar.open_backup_dir_requested.connect(self._open_backup_dir)
         self.source_target_bar.reset_backup_dir_requested.connect(self._reset_backup_dir)
+        self.source_target_bar.sync_options_changed.connect(self.on_sync_options_changed)
         self.action_diff_panel.action_selected.connect(self.on_action_selected)
         self.action_diff_panel.selection_changed.connect(self.on_selection_changed)
         self.action_diff_panel.jump_filter_relaxed.connect(self._on_jump_filter_relaxed)
+        self.action_diff_panel.conflict_target_selected.connect(self.on_conflict_target_selected)
         self.transfer_panel.transfer_requested.connect(self.show_transfer_preview)
         self.transfer_panel.cancel_requested.connect(self.cancel_transfer)
         self.transfer_panel.clear_selection_requested.connect(self.action_diff_panel.clear_selection)
@@ -134,8 +143,16 @@ class MainController(MainWindow):
         target_changed = target_path != self.state.right_root_path
         final_target = target_path
 
-        # 来源变化（拖入/选择）时，自动在目标侧寻找同名文件夹并填入
-        if source_changed and not target_changed and source_path:
+        if source_changed or target_changed:
+            self.state.ui_target_overrides.clear()
+
+        # 来源变化（拖入/选择）时，自动在目标侧寻找同名文件夹并填入（仅动作/图集模式）
+        if (
+            source_changed
+            and not target_changed
+            and source_path
+            and self.state.sync_options.mode != SYNC_MODE_UI
+        ):
             final_target = self._auto_match_target(source_path, target_path)
 
         # 用户手动更换目标时，记住其父目录作为目标根，供后续自动匹配递归兜底
@@ -339,8 +356,45 @@ class MainController(MainWindow):
             self.state.right_root_path,
             hash_cache=self._hash_cache,
             cancel_token=self._scan_cancel_token,
+            sync_options=self.state.sync_options,
+            target_overrides=self.state.ui_target_overrides,
         )
         self._run_worker(worker, self._on_compare_finished, self._on_worker_failed)
+
+    def on_sync_options_changed(self, options: SyncOptions) -> None:
+        previous = self.state.sync_options
+        self.state.sync_options = options
+        self._save_sync_options(options)
+        is_ui = options.mode == SYNC_MODE_UI
+        self.action_diff_panel.set_ui_mode(is_ui)
+        self.preview_panel.set_ui_mode(is_ui)
+        if previous.mode != options.mode or previous.ui_match_strategy != options.ui_match_strategy:
+            self.state.ui_target_overrides.clear()
+
+        only_overwrite_toggled = (
+            previous.mode == options.mode == SYNC_MODE_UI
+            and previous.ui_match_strategy == options.ui_match_strategy
+            and previous.ui_include_non_images == options.ui_include_non_images
+            and previous.ui_overwrite_only != options.ui_overwrite_only
+        )
+        if only_overwrite_toggled and self.state.compare_result is not None and not (
+            self._scan_in_progress or self._transfer_in_progress
+        ):
+            self._on_compare_finished(self.state.compare_result)
+            return
+        if self.state.left_root_path and self.state.right_root_path:
+            self.refresh_compare()
+
+    def on_conflict_target_selected(self, source_rel: str, target_rel: str) -> None:
+        key = source_rel.casefold()
+        if target_rel:
+            self.state.ui_target_overrides[key] = target_rel
+            self.transfer_panel.append_log(f"已手动指定覆盖目标: {source_rel} → {target_rel}", "info")
+        else:
+            self.state.ui_target_overrides.pop(key, None)
+            self.transfer_panel.append_log(f"已取消手动指定目标: {source_rel}", "info")
+        if self.state.left_root_path and self.state.right_root_path:
+            self.refresh_compare()
 
     def cancel_scan(self) -> None:
         """请求取消当前扫描。"""
@@ -352,7 +406,10 @@ class MainController(MainWindow):
         self._scan_in_progress = False
         self._scan_cancel_token = None
         self.state.compare_result = compare_result
-        self.state.action_items = self.action_diff_service.build_actions(compare_result)
+        self.state.action_items = self.action_diff_service.build_actions(
+            compare_result,
+            sync_options=self.state.sync_options,
+        )
         eligible = {
             file_item.relative_path
             for action in self.state.action_items
@@ -363,24 +420,52 @@ class MainController(MainWindow):
         action_count = len(self.state.action_items)
         update_count = sum(action.transfer_file_count > 0 for action in self.state.action_items)
         file_count = sum(action.transfer_file_count for action in self.state.action_items)
+        is_ui_mode = self.state.sync_options.mode == SYNC_MODE_UI
         if not action_count:
-            # 没有任何动作可展示，清掉残留预览，避免误以为是当前目录的动画
+            # 没有任何动作/资源可展示，清掉残留预览，避免误以为是当前目录的内容
             self.state.selected_relative_path = ""
             self.preview_panel.clear_all()
-            self.source_target_bar.set_scan_status("未识别到动作序列目录", "error")
-            self.transfer_panel.append_log(
-                "扫描完成，但未在目录中识别到动作序列（请确认拖入的是资源目录而非其上级目录）。",
-                "warning",
-            )
+            if is_ui_mode:
+                self.source_target_bar.set_scan_status("未扫描到 UI 资源文件", "error")
+                self.transfer_panel.append_log(
+                    "扫描完成，但目录中未发现匹配的 UI 资源文件（可检查「含非图片」选项）。",
+                    "warning",
+                )
+            else:
+                self.source_target_bar.set_scan_status("未识别到动作序列目录", "error")
+                self.transfer_panel.append_log(
+                    "扫描完成，但未在目录中识别到动作序列（请确认拖入的是资源目录而非其上级目录）。",
+                    "warning",
+                )
         elif self._is_same_directory():
             # 两侧同一目录：没有可传输文件，仅用于预览比对
+            unit = "资源" if is_ui_mode else "动作"
             self.source_target_bar.set_scan_status(
-                f"两侧为同一目录 · 仅预览 · 共 {action_count} 个动作",
+                f"两侧为同一目录 · 仅预览 · 共 {action_count} 个{unit}",
                 "ready",
             )
             self.transfer_panel.append_log(
-                f"刷新完成：两侧为同一目录，仅用于预览对比，共 {action_count} 个动作。",
+                f"刷新完成：两侧为同一目录，仅用于预览对比，共 {action_count} 个{unit}。",
                 "info",
+            )
+        elif is_ui_mode:
+            conflict_count = sum(action.status == "conflict" for action in self.state.action_items)
+            blocked_new_count = sum(
+                action.status == "only_left" and bool(action.blocked_reasons)
+                for action in self.state.action_items
+            )
+            status_text = f"扫描完成 · 共 {action_count} 个资源 · {update_count} 个待更新 · {file_count} 个文件"
+            if conflict_count:
+                status_text += f" · {conflict_count} 个冲突"
+            self.source_target_bar.set_scan_status(status_text, "ready")
+            log_parts = [f"刷新完成：共 {action_count} 个 UI 资源，{update_count} 个待更新，{file_count} 个文件"]
+            if conflict_count:
+                log_parts.append(f"{conflict_count} 个重名冲突（右键可手动指定目标）")
+            if blocked_new_count:
+                log_parts.append(f"{blocked_new_count} 个新增已拦截（仅覆盖模式）")
+            self.transfer_panel.append_log(
+                "，".join(log_parts) + "。",
+                "success" if file_count else "info",
             )
         else:
             self.source_target_bar.set_scan_status(
@@ -445,6 +530,9 @@ class MainController(MainWindow):
 
     def _update_direction_context(self) -> None:
         """把当前动作的方向上下文同步给预览区方向罗盘。"""
+        if self.state.sync_options.mode == SYNC_MODE_UI:
+            self.preview_panel.set_direction_context("", "", {}, set())
+            return
         relative_path = self.state.selected_relative_path or ""
         action_name = relative_path.rstrip("/").split("/")[-1] if relative_path else ""
         parent = PurePosixPath(relative_path).parent.as_posix() if relative_path else "."
@@ -496,12 +584,34 @@ class MainController(MainWindow):
         role = "来源" if side == "left" else "目标"
         self.transfer_panel.append_log(f"{role}预览失败: {message}", "error")
 
+    def _build_transfer_metadata(
+        self,
+    ) -> tuple[dict[str, str], dict[str, tuple[tuple[int, int], tuple[int, int]]]]:
+        target_map: dict[str, str] = {}
+        dimension_mismatches: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {}
+        for action in self.state.action_items:
+            for file_item in action.file_diffs:
+                if file_item.resolved_target_relative_path != file_item.relative_path:
+                    target_map[file_item.relative_path] = file_item.resolved_target_relative_path
+                if (
+                    file_item.has_dimension_mismatch
+                    and file_item.source_dimensions is not None
+                    and file_item.target_dimensions is not None
+                ):
+                    dimension_mismatches[file_item.relative_path] = (
+                        file_item.source_dimensions,
+                        file_item.target_dimensions,
+                    )
+        return target_map, dimension_mismatches
+
     def show_transfer_preview(self) -> None:
         paths = sorted(self.state.selected_file_paths)
         if not paths:
             QMessageBox.information(self, "提示", "请先勾选要传输的动作或文件。")
             return
         backup_enabled, backup_dir = self.source_target_bar.backup_config()
+        is_ui_mode = self.state.sync_options.mode == SYNC_MODE_UI
+        target_map, dimension_mismatches = self._build_transfer_metadata()
         dialog = TransferPreviewDialog(
             self.state.left_root_path,
             self.state.right_root_path,
@@ -511,6 +621,10 @@ class MainController(MainWindow):
             backup_dir=backup_dir,
             action_statuses={action.relative_path: action.status for action in self.state.action_items},
             parent=self,
+            target_map=target_map or None,
+            dimension_mismatches=dimension_mismatches or None,
+            expand_atlas=not is_ui_mode,
+            ui_mode=is_ui_mode,
         )
         try:
             accepted = dialog.exec() == QDialog.DialogCode.Accepted
@@ -526,10 +640,14 @@ class MainController(MainWindow):
         self._start_transfer(final_paths)
 
     def _start_transfer(self, relative_paths: list[str]) -> None:
+        is_ui_mode = self.state.sync_options.mode == SYNC_MODE_UI
+        target_map, _ = self._build_transfer_metadata()
         job = self.transfer_service.build_job_for_files(
             self.state.left_root_path,
             self.state.right_root_path,
             relative_paths,
+            target_map=target_map or None,
+            expand_atlas=not is_ui_mode,
         )
         if job.total_files == 0:
             QMessageBox.information(self, "提示", "选中范围内没有可复制文件。")
@@ -697,7 +815,8 @@ class MainController(MainWindow):
         if self._scan_in_progress or self._transfer_in_progress:
             return
         self._pending_refresh = False
-        self.state = AppState()
+        current_options = self.state.sync_options
+        self.state = AppState(sync_options=current_options)
         self.source_target_bar.set_paths("", "")
         self.source_target_bar.set_scan_status("请选择来源和目标目录", "idle")
         self.source_target_bar.refresh_button.setEnabled(False)
@@ -717,8 +836,41 @@ class MainController(MainWindow):
         self._pinned_targets = load_pinned_paths(self.settings.value("paths/pinned_target_json", None))
         self.source_target_bar.set_pinned_targets(self._pinned_targets)
         self._restore_backup_config()
+        self._restore_sync_options()
         if source and target:
             self.source_target_bar.set_scan_status("已恢复上次目录，点击“刷新对比”开始扫描", "idle")
+
+    def _restore_sync_options(self) -> None:
+        raw_mode = str(self.settings.value("sync/mode", SYNC_MODE_AUTO) or SYNC_MODE_AUTO)
+        mode = raw_mode if raw_mode in {SYNC_MODE_AUTO, SYNC_MODE_UI} else SYNC_MODE_AUTO
+        raw_strategy = str(self.settings.value("sync/uiMatchStrategy", UI_MATCH_RELATIVE) or UI_MATCH_RELATIVE)
+        strategy = raw_strategy if raw_strategy in {UI_MATCH_RELATIVE, UI_MATCH_FILENAME} else UI_MATCH_RELATIVE
+        overwrite_only = self._parse_bool_setting(
+            self.settings.value("sync/uiOverwriteOnly", True),
+            default=True,
+        )
+        include_non_images = self._parse_bool_setting(
+            self.settings.value("sync/uiIncludeNonImages", False),
+            default=False,
+        )
+        options = SyncOptions(
+            mode=mode,
+            ui_match_strategy=strategy,
+            ui_overwrite_only=overwrite_only,
+            ui_include_non_images=include_non_images,
+        )
+        self.state.sync_options = options
+        self.source_target_bar.set_sync_options(options)
+        is_ui = mode == SYNC_MODE_UI
+        self.action_diff_panel.set_ui_mode(is_ui)
+        self.preview_panel.set_ui_mode(is_ui)
+
+    def _save_sync_options(self, options: SyncOptions) -> None:
+        self.settings.setValue("sync/mode", options.mode)
+        self.settings.setValue("sync/uiMatchStrategy", options.ui_match_strategy)
+        self.settings.setValue("sync/uiOverwriteOnly", bool(options.ui_overwrite_only))
+        self.settings.setValue("sync/uiIncludeNonImages", bool(options.ui_include_non_images))
+        self.settings.sync()
 
     def _restore_backup_config(self) -> None:
         enabled = self._parse_bool_setting(

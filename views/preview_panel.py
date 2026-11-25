@@ -29,6 +29,30 @@ STATUS_EMPTY_TEXT = {
 }
 
 
+def draw_checkerboard(
+    painter: QPainter,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    tile_size: int = 8,
+) -> None:
+    """在透明图像下方绘制暗色棋盘格，便于检查 UI 图标边缘与半透明通道。"""
+    if width <= 0 or height <= 0:
+        return
+    light = QColor("#2c3138")
+    dark = QColor("#21252b")
+    painter.save()
+    painter.fillRect(x, y, width, height, dark)
+    for row_start in range(0, height, tile_size):
+        row_index = row_start // tile_size
+        tile_h = min(tile_size, height - row_start)
+        for col_start in range((row_index % 2) * tile_size, width, tile_size * 2):
+            tile_w = min(tile_size, width - col_start)
+            painter.fillRect(x + col_start, y + row_start, tile_w, tile_h, light)
+    painter.restore()
+
+
 def draw_hud_overlay(
     painter: QPainter,
     *,
@@ -173,6 +197,7 @@ class SinglePreviewWidget(QWidget):
         self._zoom_percent = 100
         self._offset_y = 50
         self._progress = 0.0
+        self._checkerboard_enabled = False
         self._item = PreviewItem(role, "", None, None)
         self.setProperty("previewPanelRole", role)
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -195,7 +220,7 @@ class SinglePreviewWidget(QWidget):
 
         self.canvas = PreviewCanvas()
         self.canvas.setAlignment(Qt.AlignCenter)
-        self.canvas.setMinimumHeight(300)
+        self.canvas.setMinimumHeight(240)
         self.canvas.setWordWrap(True)
         self.canvas.setProperty("previewCanvas", True)
         self.canvas.resized.connect(self._render_current_frame)
@@ -257,6 +282,9 @@ class SinglePreviewWidget(QWidget):
             return
 
         self._update_meta()
+        if item.status == "not_previewable":
+            self._set_empty_state(item.message or STATUS_EMPTY_TEXT.get(item.status, "暂无预览"))
+            return
         self._set_empty_state(STATUS_EMPTY_TEXT.get(item.status, "暂无预览"))
 
     def render_at_progress(self, progress: float) -> None:
@@ -297,6 +325,13 @@ class SinglePreviewWidget(QWidget):
     def set_compass_visible(self, visible: bool) -> None:
         self.compass.set_user_visible(visible)
 
+    def set_role_title(self, title: str) -> None:
+        self.role_label.setText(title)
+
+    def set_checkerboard_enabled(self, enabled: bool) -> None:
+        self._checkerboard_enabled = enabled
+        self._render_current_frame()
+
     def _sync_compass_geometry(self) -> None:
         self.compass.setGeometry(self.canvas.rect())
 
@@ -313,6 +348,8 @@ class SinglePreviewWidget(QWidget):
         painter = QPainter(frame)
         draw_x = int((available.width() - scaled.width()) / 2)
         draw_y = int((available.height() - scaled.height()) / 2 + self._offset_y)
+        if self._checkerboard_enabled:
+            draw_checkerboard(painter, draw_x, draw_y, scaled.width(), scaled.height())
         painter.drawPixmap(draw_x, draw_y, scaled)
 
         # ===== HUD overlay =====
@@ -383,13 +420,14 @@ class BlinkPreviewWidget(QWidget):
         self._offset_y = 50
         self._frame_number = 0
         self._frame_count = 0
+        self._checkerboard_enabled = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.title_label = QLabel("来源｜新动作")
         self.title_label.setProperty("previewRole", "source")
         self.canvas = PreviewCanvas()
         self.canvas.setAlignment(Qt.AlignCenter)
-        self.canvas.setMinimumHeight(300)
+        self.canvas.setMinimumHeight(240)
         self.canvas.setProperty("previewCanvas", True)
         self.canvas.resized.connect(self._render)
         self.meta_label = QLabel("差异闪烁模式")
@@ -419,6 +457,10 @@ class BlinkPreviewWidget(QWidget):
         self._offset_y = value
         self._render()
 
+    def set_checkerboard_enabled(self, enabled: bool) -> None:
+        self._checkerboard_enabled = enabled
+        self._render()
+
     def _render(self) -> None:
         if self._pixmap.isNull():
             self.canvas.setPixmap(QPixmap())
@@ -438,6 +480,8 @@ class BlinkPreviewWidget(QWidget):
         painter = QPainter(frame)
         draw_x = (available.width() - scaled.width()) // 2
         draw_y = (available.height() - scaled.height()) // 2 + self._offset_y
+        if self._checkerboard_enabled:
+            draw_checkerboard(painter, draw_x, draw_y, scaled.width(), scaled.height())
         painter.drawPixmap(draw_x, draw_y, scaled)
 
         # HUD overlay（闪烁模式下侧别提示尤其重要）
@@ -472,14 +516,15 @@ class PreviewPanel(QWidget):
         self._blink_timer.setInterval(450)
         self._blink_timer.timeout.connect(self._toggle_blink_side)
         self._blink_side = "source"
+        self._ui_mode = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
         header = QHBoxLayout()
-        title = QLabel("同步动画对比")
-        title.setProperty("sectionTitle", True)
+        self.title_label = QLabel("同步动画对比")
+        self.title_label.setProperty("sectionTitle", True)
         self.mode_group = QButtonGroup(self)
         self.mode_group.setExclusive(True)
         self.parallel_button = QPushButton("并排")
@@ -498,11 +543,16 @@ class PreviewPanel(QWidget):
         self.compass_toggle.setToolTip("在预览画布上显示八方向罗盘；点击热区可跳转到该方向的同名动作")
         self.compass_toggle.setAccessibleName("方向罗盘开关")
         self.compass_toggle.setProperty("compassToggle", True)
-        header.addWidget(title)
+        header.addWidget(self.title_label)
         header.addStretch(1)
         header.addWidget(self.parallel_button)
         header.addWidget(self.blink_button)
         header.addWidget(self.compass_toggle)
+
+        self.dimension_warning_label = QLabel()
+        self.dimension_warning_label.setProperty("dimensionWarning", True)
+        self.dimension_warning_label.setWordWrap(True)
+        self.dimension_warning_label.setVisible(False)
 
         self.left_preview = SinglePreviewWidget("来源｜新动作", "source")
         self.right_preview = SinglePreviewWidget("目标｜SVN", "target")
@@ -522,7 +572,10 @@ class PreviewPanel(QWidget):
         self.preview_stack.addWidget(parallel_page)
         self.preview_stack.addWidget(self.blink_preview)
 
-        controls = QHBoxLayout()
+        controls_bar = QWidget()
+        controls_bar.setMinimumHeight(38)
+        controls = QHBoxLayout(controls_bar)
+        controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(8)
         self.play_button = QToolButton()
         self.play_button.setIcon(self._tinted_icon(QStyle.SP_MediaPause))
@@ -570,8 +623,9 @@ class PreviewPanel(QWidget):
         controls.addWidget(self.offset_slider)
 
         layout.addLayout(header)
+        layout.addWidget(self.dimension_warning_label)
         layout.addWidget(self.preview_stack, 1)
-        layout.addLayout(controls)
+        layout.addWidget(controls_bar)
 
         self.play_button.clicked.connect(self._toggle_playback)
         self.frame_slider.valueChanged.connect(self._render_progress)
@@ -587,7 +641,22 @@ class PreviewPanel(QWidget):
     def set_preview(self, side: str, item: PreviewItem) -> None:
         preview = self.left_preview if side == "left" else self.right_preview
         preview.set_preview(item)
+        self._update_dimension_warning()
         self._reset_timeline()
+
+    def set_ui_mode(self, enabled: bool) -> None:
+        self._ui_mode = enabled
+        self.title_label.setText("UI 单图对比" if enabled else "同步动画对比")
+        self.left_preview.set_role_title("来源｜UI 修改" if enabled else "来源｜新动作")
+        self.left_preview.set_checkerboard_enabled(enabled)
+        self.right_preview.set_checkerboard_enabled(enabled)
+        self.blink_preview.set_checkerboard_enabled(enabled)
+        self.compass_toggle.setVisible(not enabled)
+        effective_compass = False if enabled else self.compass_toggle.isChecked()
+        self.left_preview.set_compass_visible(effective_compass)
+        self.right_preview.set_compass_visible(effective_compass)
+        for widget in (self.play_button, self.frame_label, self.frame_slider):
+            widget.setVisible(not enabled)
 
     def set_direction_context(
         self,
@@ -607,14 +676,37 @@ class PreviewPanel(QWidget):
         self.compass_toggle.setChecked(visible)
 
     def _on_compass_toggled(self, checked: bool) -> None:
-        self.left_preview.set_compass_visible(checked)
-        self.right_preview.set_compass_visible(checked)
+        effective = False if self._ui_mode else checked
+        self.left_preview.set_compass_visible(effective)
+        self.right_preview.set_compass_visible(effective)
 
     def clear_all(self) -> None:
         self.left_preview.clear_preview()
         self.right_preview.clear_preview()
+        self.dimension_warning_label.clear()
+        self.dimension_warning_label.setVisible(False)
         self.frame_slider.setRange(0, 0)
         self.frame_label.setText("0 / 0")
+
+    def _update_dimension_warning(self) -> None:
+        left_item = self.left_preview._item
+        right_item = self.right_preview._item
+        if (
+            left_item.status == "ready"
+            and right_item.status == "ready"
+            and left_item.width > 0
+            and left_item.height > 0
+            and right_item.width > 0
+            and right_item.height > 0
+            and (left_item.width, left_item.height) != (right_item.width, right_item.height)
+        ):
+            self.dimension_warning_label.setText(
+                f"⚠ 尺寸不一致：来源 {left_item.width}×{left_item.height} ≠ 目标 {right_item.width}×{right_item.height}"
+            )
+            self.dimension_warning_label.setVisible(True)
+        else:
+            self.dimension_warning_label.clear()
+            self.dimension_warning_label.setVisible(False)
 
     def _reset_timeline(self) -> None:
         maximum = max(self.left_preview.frame_count, self.right_preview.frame_count, 1)

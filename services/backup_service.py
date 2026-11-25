@@ -111,7 +111,7 @@ class BackupService:
         targets: list[tuple[str, Path]] = []
         seen: set[str] = set()
         for item in job.items:
-            raw_rel = (item.relative_path or "").replace("\\", "/")
+            raw_rel = (item.effective_target_relative_path or "").replace("\\", "/")
             if not raw_rel.strip():
                 continue
             rel_path = Path(raw_rel)

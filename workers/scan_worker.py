@@ -2,6 +2,7 @@
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from models.sync_options import SyncOptions
 from services.refresh_service import RefreshService
 from utils.cancel_token import CancellationToken
 from utils.hash_utils import HashCache
@@ -17,12 +18,16 @@ class ScanWorker(QObject):
         right_root: str,
         hash_cache: HashCache | None = None,
         cancel_token: CancellationToken | None = None,
+        sync_options: SyncOptions | None = None,
+        target_overrides: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self.left_root = left_root
         self.right_root = right_root
         self.refresh_service = RefreshService(hash_cache=hash_cache)
         self._cancel_token = cancel_token
+        self._sync_options = sync_options
+        self._target_overrides = dict(target_overrides or {})
 
     @Slot()
     def run(self) -> None:
@@ -31,6 +36,8 @@ class ScanWorker(QObject):
                 self.left_root,
                 self.right_root,
                 cancel_token=self._cancel_token,
+                sync_options=self._sync_options,
+                target_overrides=self._target_overrides,
             )
             self.finished.emit(result)
         except Exception as exc:  # noqa: BLE001

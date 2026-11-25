@@ -20,28 +20,77 @@ class PathEscapeError(ValueError):
 
 
 class TransferService:
-    def build_job_for_files(self, left_root: str, right_root: str, relative_paths: list[str]) -> TransferJob:
+    def build_job_for_files(
+        self,
+        left_root: str,
+        right_root: str,
+        relative_paths: list[str],
+        *,
+        target_map: dict[str, str] | None = None,
+        expand_atlas: bool = True,
+    ) -> TransferJob:
         """按相对路径构建传输任务。
 
-        图集条目强制「png + plist 成对传输」：只要勾选了其中任一文件，
-        就把同名的另一个也一并纳入，避免目标端出现「有图无布局」或
-        「有布局无图」的破损状态（客户端会直接渲染错乱）。
+        - ``expand_atlas=True``（默认）：图集条目强制「png + plist 成对传输」。
+        - ``target_map``：可选的 ``source_rel -> target_rel`` 映射，支持跨层级覆盖。
         """
         items: list[TransferItem] = []
         left = self._resolve_root(left_root)
         right = self._resolve_root(right_root)
-        for relative_path in sorted(self._expand_atlas_pairs(left, relative_paths)):
-            source = self._safe_join(left, relative_path)
-            target = self._safe_join(right, relative_path)
+        target_map_ci = {
+            str(key).replace("\\", "/").casefold(): str(val).replace("\\", "/")
+            for key, val in (target_map or {}).items()
+            if val
+        }
+        case_insensitive = os.name == "nt" or sys.platform == "darwin"
+        if expand_atlas:
+            candidate_paths = sorted(self._expand_atlas_pairs(left, relative_paths))
+        else:
+            seen_sources: set[str] = set()
+            candidate_paths = []
+            for relative_path in sorted(relative_paths):
+                raw_rel = (relative_path or "").replace("\\", "/")
+                if not raw_rel.strip():
+                    continue
+                rel_obj = Path(raw_rel)
+                if rel_obj.is_absolute() or rel_obj.drive or rel_obj.root:
+                    continue
+                rel_posix = rel_obj.as_posix()
+                if not rel_posix or rel_posix == ".":
+                    continue
+                key = rel_posix.casefold() if case_insensitive else rel_posix
+                if key in seen_sources:
+                    continue
+                seen_sources.add(key)
+                candidate_paths.append(rel_posix)
+
+        seen_targets: set[str] = set()
+        for relative_path in candidate_paths:
+            source_rel = Path(relative_path).as_posix()
+            target_rel_raw = target_map_ci.get(source_rel.casefold(), source_rel)
+            target_rel_obj = Path(target_rel_raw)
+            if target_rel_obj.is_absolute() or target_rel_obj.drive or target_rel_obj.root:
+                continue
+            target_rel = target_rel_obj.as_posix()
+            if not target_rel or target_rel == ".":
+                continue
+
+            source = self._safe_join(left, source_rel)
+            target = self._safe_join(right, target_rel)
             if source is None or target is None:
                 continue
             if not source.exists() or not source.is_file():
                 continue
+            target_key = target.as_posix().casefold() if case_insensitive else target.as_posix()
+            if target_key in seen_targets:
+                continue
+            seen_targets.add(target_key)
             items.append(
                 TransferItem(
-                    relative_path=Path(relative_path).as_posix(),
+                    relative_path=source_rel,
                     source_path=str(source),
                     target_path=str(target),
+                    target_relative_path=target_rel,
                 )
             )
         return TransferJob(items=items)

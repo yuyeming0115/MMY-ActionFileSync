@@ -6,6 +6,7 @@ from PySide6.QtCore import QPointF, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QFileDialog,
     QFrame,
@@ -24,6 +25,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from models.sync_options import (
+    SYNC_MODE_AUTO,
+    SYNC_MODE_UI,
+    SyncOptions,
+    UI_MATCH_FILENAME,
+    UI_MATCH_RELATIVE,
+)
 from utils.path_matcher import normalize_path
 from utils.pinned_paths import contains_pinned_path, format_pinned_labels
 from views.flow_layout import ButtonRowArea
@@ -105,13 +113,13 @@ class PathRoleField(QFrame):
         layout.setSpacing(4)
 
         heading = QHBoxLayout()
-        title_label = QLabel(title)
-        title_label.setProperty("pathTitle", True)
-        role_label = QLabel(role_text)
-        role_label.setProperty("pathHint", True)
-        heading.addWidget(title_label)
+        self.title_label = QLabel(title)
+        self.title_label.setProperty("pathTitle", True)
+        self.role_label = QLabel(role_text)
+        self.role_label.setProperty("pathHint", True)
+        heading.addWidget(self.title_label)
         heading.addStretch(1)
-        heading.addWidget(role_label)
+        heading.addWidget(self.role_label)
 
         path_row = QHBoxLayout()
         path_row.setSpacing(6)
@@ -181,6 +189,9 @@ class PathRoleField(QFrame):
         path = QFileDialog.getExistingDirectory(self, "选择目录", self.path())
         if path:
             self._set_path(path)
+
+    def set_title(self, title: str) -> None:
+        self.title_label.setText(title)
 
     def _set_path(self, path: str) -> None:
         self.set_path(path)
@@ -455,6 +466,90 @@ class BackupConfigBar(QFrame):
             menu.deleteLater()
 
 
+class UIOptionBar(QFrame):
+    """UI 资源模式专属策略栏：匹配策略、仅覆盖已有开关、非图片过滤开关。"""
+
+    options_changed = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setProperty("uiOptionBar", True)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self._syncing = False
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 8, 3)
+        layout.setSpacing(8)
+
+        title = QLabel("UI 策略")
+        title.setProperty("uiOptionTitle", True)
+
+        match_label = QLabel("匹配:")
+        match_label.setProperty("secondaryText", True)
+
+        self.match_group = QButtonGroup(self)
+        self.match_group.setExclusive(True)
+        self.relative_button = QPushButton("按相对路径")
+        self.relative_button.setCheckable(True)
+        self.relative_button.setChecked(True)
+        self.relative_button.setProperty("segment", True)
+        self.relative_button.setToolTip("左右按相同相对路径 1:1 匹配（适合平铺对平铺或同构目录树）")
+        self.filename_button = QPushButton("按文件名定位")
+        self.filename_button.setCheckable(True)
+        self.filename_button.setProperty("segment", True)
+        self.filename_button.setToolTip("按文件名自动定位右侧对应目录，支持跨层级回填；重名将标为冲突拦截")
+        self.match_group.addButton(self.relative_button, 0)
+        self.match_group.addButton(self.filename_button, 1)
+
+        self.overwrite_only_checkbox = _BackupToggleCheckBox("仅覆盖已有")
+        self.overwrite_only_checkbox.setProperty("backupToggle", True)
+        self.overwrite_only_checkbox.setChecked(True)
+        self.overwrite_only_checkbox.setToolTip("开启后仅允许覆盖目标中已存在的同名文件，拦截来源多出的新增文件")
+
+        self.include_non_images_checkbox = _BackupToggleCheckBox("含非图片")
+        self.include_non_images_checkbox.setProperty("backupToggle", True)
+        self.include_non_images_checkbox.setChecked(False)
+        self.include_non_images_checkbox.setToolTip("默认仅扫描图片；勾选后同时扫描并同步 .psd/.csv/.json/.txt 等非图片文件")
+
+        layout.addWidget(title)
+        layout.addWidget(match_label)
+        layout.addWidget(self.relative_button)
+        layout.addWidget(self.filename_button)
+        layout.addSpacing(8)
+        layout.addWidget(self.overwrite_only_checkbox)
+        layout.addWidget(self.include_non_images_checkbox)
+        layout.addStretch(1)
+
+        self.match_group.idClicked.connect(lambda _id: self._emit_if_ready())
+        self.overwrite_only_checkbox.toggled.connect(lambda _checked: self._emit_if_ready())
+        self.include_non_images_checkbox.toggled.connect(lambda _checked: self._emit_if_ready())
+
+    def match_strategy(self) -> str:
+        return UI_MATCH_FILENAME if self.filename_button.isChecked() else UI_MATCH_RELATIVE
+
+    def overwrite_only(self) -> bool:
+        return self.overwrite_only_checkbox.isChecked()
+
+    def include_non_images(self) -> bool:
+        return self.include_non_images_checkbox.isChecked()
+
+    def set_values(self, *, match_strategy: str, overwrite_only: bool, include_non_images: bool) -> None:
+        self._syncing = True
+        try:
+            if match_strategy == UI_MATCH_FILENAME:
+                self.filename_button.setChecked(True)
+            else:
+                self.relative_button.setChecked(True)
+            self.overwrite_only_checkbox.setChecked(bool(overwrite_only))
+            self.include_non_images_checkbox.setChecked(bool(include_non_images))
+        finally:
+            self._syncing = False
+
+    def _emit_if_ready(self) -> None:
+        if not self._syncing:
+            self.options_changed.emit()
+
+
 class SourceTargetBar(QWidget):
     path_changed = Signal(str, str)
     refresh_requested = Signal()
@@ -470,11 +565,13 @@ class SourceTargetBar(QWidget):
     backup_config_edited = Signal(bool, str)
     open_backup_dir_requested = Signal(str)
     reset_backup_dir_requested = Signal()
+    sync_options_changed = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self._pinned_targets: list[str] = []
+        self._syncing_options = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(5)
@@ -482,6 +579,20 @@ class SourceTargetBar(QWidget):
         toolbar = QHBoxLayout()
         title = QLabel("MMY Action File Sync")
         title.setProperty("appTitle", True)
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
+        self.mode_auto_button = QPushButton("动作/图集")
+        self.mode_auto_button.setCheckable(True)
+        self.mode_auto_button.setChecked(True)
+        self.mode_auto_button.setProperty("segment", True)
+        self.mode_auto_button.setToolTip("序列帧动作目录与平铺图集（png+plist）模式")
+        self.mode_ui_button = QPushButton("UI资源")
+        self.mode_ui_button.setCheckable(True)
+        self.mode_ui_button.setProperty("segment", True)
+        self.mode_ui_button.setToolTip("UI 图标与界面散图模式，支持跨层级按文件名匹配与尺寸预警")
+        self.mode_group.addButton(self.mode_auto_button, 0)
+        self.mode_group.addButton(self.mode_ui_button, 1)
+
         self.status_label = QLabel("请选择来源和目标目录")
         self.status_label.setProperty("scanStatus", "idle")
         self.refresh_button = QPushButton("刷新对比")
@@ -492,7 +603,10 @@ class SourceTargetBar(QWidget):
         self.redundancy_button.setAccessibleName("冗余帧扫描")
         self.clear_button = QPushButton("清空")
         toolbar.addWidget(title)
-        toolbar.addSpacing(12)
+        toolbar.addSpacing(8)
+        toolbar.addWidget(self.mode_auto_button)
+        toolbar.addWidget(self.mode_ui_button)
+        toolbar.addSpacing(8)
         toolbar.addWidget(self.status_label)
         toolbar.addStretch(1)
         toolbar.addWidget(self.refresh_button)
@@ -526,6 +640,8 @@ class SourceTargetBar(QWidget):
         self.target_field = PathRoleField("目标｜SVN 工作目录", "将写入/覆盖", "target", enable_pin=True)
         self.backup_bar = BackupConfigBar()
         self.pinned_target_bar = PinnedTargetBar()
+        self.ui_option_bar = UIOptionBar()
+        self.ui_option_bar.setVisible(False)
 
         path_grid.addWidget(self.source_field, 0, 0)
         path_grid.addWidget(direction, 0, 1)
@@ -535,7 +651,10 @@ class SourceTargetBar(QWidget):
 
         layout.addLayout(toolbar)
         layout.addLayout(path_grid)
+        layout.addWidget(self.ui_option_bar)
 
+        self.mode_group.idClicked.connect(lambda _id: self._on_sync_options_ui_changed())
+        self.ui_option_bar.options_changed.connect(self._on_sync_options_ui_changed)
         self.source_field.path_changed.connect(lambda _: self._emit_paths())
         self.target_field.path_changed.connect(lambda _: self._emit_paths())
         self.target_field.pin_clicked.connect(self._on_pin_clicked)
@@ -589,6 +708,9 @@ class SourceTargetBar(QWidget):
         self.status_label.style().polish(self.status_label)
 
     def set_busy(self, busy: bool) -> None:
+        self.mode_auto_button.setEnabled(not busy)
+        self.mode_ui_button.setEnabled(not busy)
+        self.ui_option_bar.setEnabled(not busy)
         self.source_field.setEnabled(not busy)
         self.target_field.setEnabled(not busy)
         self.backup_bar.setEnabled(not busy)
@@ -597,6 +719,44 @@ class SourceTargetBar(QWidget):
         self.cancel_button.setVisible(busy)
         self.clear_button.setEnabled(not busy)
         self.redundancy_button.setEnabled(not busy)
+
+    def sync_options(self) -> SyncOptions:
+        mode = SYNC_MODE_UI if self.mode_ui_button.isChecked() else SYNC_MODE_AUTO
+        return SyncOptions(
+            mode=mode,
+            ui_match_strategy=self.ui_option_bar.match_strategy(),
+            ui_overwrite_only=self.ui_option_bar.overwrite_only(),
+            ui_include_non_images=self.ui_option_bar.include_non_images(),
+        )
+
+    def set_sync_options(self, options: SyncOptions) -> None:
+        self._syncing_options = True
+        try:
+            is_ui = options.mode == SYNC_MODE_UI
+            if is_ui:
+                self.mode_ui_button.setChecked(True)
+            else:
+                self.mode_auto_button.setChecked(True)
+            self.ui_option_bar.set_values(
+                match_strategy=options.ui_match_strategy,
+                overwrite_only=options.ui_overwrite_only,
+                include_non_images=options.ui_include_non_images,
+            )
+            self._apply_mode_chrome(is_ui)
+        finally:
+            self._syncing_options = False
+
+    def _apply_mode_chrome(self, is_ui: bool) -> None:
+        self.ui_option_bar.setVisible(is_ui)
+        self.redundancy_button.setVisible(not is_ui)
+        self.source_field.set_title("来源｜UI 修改目录" if is_ui else "来源｜新动作目录")
+
+    def _on_sync_options_ui_changed(self) -> None:
+        if self._syncing_options:
+            return
+        options = self.sync_options()
+        self._apply_mode_chrome(options.mode == SYNC_MODE_UI)
+        self.sync_options_changed.emit(options)
 
     def _on_pin_clicked(self) -> None:
         self.sync_pinned_state()

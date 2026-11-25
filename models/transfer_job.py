@@ -8,6 +8,11 @@ class TransferItem:
     relative_path: str
     source_path: str
     target_path: str
+    target_relative_path: str = ""
+
+    @property
+    def effective_target_relative_path(self) -> str:
+        return self.target_relative_path or self.relative_path
 
 
 @dataclass

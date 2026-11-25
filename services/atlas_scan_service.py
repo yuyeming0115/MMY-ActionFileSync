@@ -49,13 +49,13 @@ def detect_atlas_directory(root_path: str) -> bool:
     if not root.is_dir():
         return False
     try:
-        entries = [entry for entry in os.scandir(root) if entry.is_file()]
+        all_entries = list(os.scandir(root))
     except OSError:
         return False
     # 存在子目录就不是平铺结构
-    if any(Path(entry.path).is_dir() for entry in entries):
+    if any(entry.is_dir() for entry in all_entries):
         return False
-    names = {entry.name for entry in entries}
+    names = {entry.name for entry in all_entries if entry.is_file()}
     plists = {name for name in names if name.lower().endswith(ATLAS_PLIST)}
     if len(plists) < 2:
         return False

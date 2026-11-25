@@ -257,6 +257,25 @@ class MainWindow(QMainWindow):
                 border: 1px solid #4d3726;
                 border-radius: 6px;
             }
+            QFrame[uiOptionBar="true"] {
+                background: #22262c;
+                border: 1px solid #35414f;
+                border-radius: 6px;
+            }
+            QFrame[uiOptionBar="true"] QLabel[uiOptionTitle="true"] {
+                color: #82b8e8;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QLabel[dimensionWarning="true"] {
+                color: #ff9800;
+                font-size: 12px;
+                font-weight: 600;
+                background: rgba(255, 152, 0, 0.12);
+                border: 1px solid rgba(255, 152, 0, 0.45);
+                border-radius: 4px;
+                padding: 3px 8px;
+            }
             QScrollArea#buttonRowArea, QWidget#buttonRowViewport, QWidget#buttonRowContent {
                 background: transparent;
             }

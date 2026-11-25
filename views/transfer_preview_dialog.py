@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont
@@ -26,8 +26,10 @@ from utils.app_info import create_app_settings
 COLUMN_COUNT = 4
 DEFAULT_COLUMN_WIDTHS = [240, 540, 110, 90]
 ROLE_EXTRA_NEW = Qt.UserRole + 1
+ROLE_DIM_MISMATCH = Qt.UserRole + 2
 EXTRA_TO_TARGET_DARK_BG = QColor("#ff6b5e")
 EXTRA_TO_TARGET_LIGHT_BG = QColor("#d32f2f")
+DIM_MISMATCH_FG = QColor("#ff9800")
 
 
 class TransferPreviewDialog(QDialog):
@@ -41,6 +43,11 @@ class TransferPreviewDialog(QDialog):
         backup_dir: str = "",
         action_statuses: dict[str, str] | None = None,
         parent: QWidget | None = None,
+        *,
+        target_map: dict[str, str] | None = None,
+        dimension_mismatches: dict[str, tuple[tuple[int, int], tuple[int, int]]] | None = None,
+        expand_atlas: bool = True,
+        ui_mode: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("确认传输范围")
@@ -50,6 +57,18 @@ class TransferPreviewDialog(QDialog):
         self.action_map = action_map or {}
         self._action_map_ci = {key.casefold(): val for key, val in self.action_map.items()}
         self._action_statuses_ci = {key.casefold(): val for key, val in (action_statuses or {}).items()}
+        self._target_map_ci = {
+            str(key).replace("\\", "/").casefold(): str(val).replace("\\", "/")
+            for key, val in (target_map or {}).items()
+            if val
+        }
+        self._dimension_mismatches_ci = {
+            str(key).replace("\\", "/").casefold(): val
+            for key, val in (dimension_mismatches or {}).items()
+            if val
+        }
+        self._expand_atlas = expand_atlas
+        self._ui_mode = ui_mode
         self._backup_enabled = backup_enabled
         self._backup_dir = backup_dir.strip()
         self._updating_checks = False
@@ -69,10 +88,15 @@ class TransferPreviewDialog(QDialog):
         self.extra_warning_label.setStyleSheet(f"color: {self._extra_fg.name()}; font-weight: 600;")
         self.extra_warning_label.setWordWrap(True)
         self.extra_warning_label.setVisible(False)
+        self.dimension_warning_label = QLabel()
+        self.dimension_warning_label.setStyleSheet(f"color: {DIM_MISMATCH_FG.name()}; font-weight: 600;")
+        self.dimension_warning_label.setWordWrap(True)
+        self.dimension_warning_label.setVisible(False)
         layout.addWidget(heading)
         layout.addWidget(self.info_label)
         layout.addWidget(self.backup_hint_label)
         layout.addWidget(self.extra_warning_label)
+        layout.addWidget(self.dimension_warning_label)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["动作 / 文件", "目标位置", "状态", "大小"])
@@ -202,15 +226,25 @@ class TransferPreviewDialog(QDialog):
         self._atlas_companions.clear()
         left_resolved = self.left_root.resolve()
         right_resolved = self.right_root.resolve()
-        expanded_paths = TransferService.expand_atlas_paths(left_resolved, relative_paths)
+        if self._expand_atlas:
+            expanded_paths = TransferService.expand_atlas_paths(left_resolved, relative_paths)
+        else:
+            expanded_paths = sorted(
+                {str(path).replace("\\", "/") for path in relative_paths if str(path).strip()}
+            )
 
-        groups: dict[str, list[tuple[str, Path, Path]]] = defaultdict(list)
+        groups: dict[str, list[tuple[str, str, Path, Path]]] = defaultdict(list)
         for relative_path in expanded_paths:
+            target_rel = self._target_map_ci.get(relative_path.casefold(), relative_path)
             source = TransferService._safe_join(left_resolved, relative_path)
-            target = TransferService._safe_join(right_resolved, relative_path)
+            target = TransferService._safe_join(right_resolved, target_rel)
             if source is None or target is None or not source.is_file():
                 continue
-            groups[self._resolve_action_group(relative_path)].append((relative_path, source, target))
+            if self._ui_mode:
+                group_key = PurePosixPath(target_rel).parent.as_posix()
+            else:
+                group_key = self._resolve_action_group(relative_path)
+            groups[group_key].append((relative_path, target_rel, source, target))
 
         bold_font = QFont(self.tree.font())
         bold_font.setBold(True)
@@ -219,7 +253,11 @@ class TransferPreviewDialog(QDialog):
         try:
             for action_path, entries in sorted(groups.items()):
                 parent = QTreeWidgetItem(self.tree)
-                parent.setText(0, Path(action_path).name or action_path)
+                if self._ui_mode:
+                    group_label = "根目录" if action_path in {"", "."} else action_path
+                else:
+                    group_label = Path(action_path).name or action_path
+                parent.setText(0, group_label)
                 target_dir_path = (
                     right_resolved
                     if action_path in {"", "."}
@@ -233,17 +271,33 @@ class TransferPreviewDialog(QDialog):
                 parent.setCheckState(0, Qt.Checked)
                 parent.setExpanded(True)
 
-                is_existing_target = self._is_existing_target_action(action_path, entries, target_dir_path)
+                is_existing_target = (
+                    False
+                    if self._ui_mode
+                    else self._is_existing_target_action(
+                        action_path,
+                        [(rel, src, dst) for rel, _trel, src, dst in entries],
+                        target_dir_path,
+                    )
+                )
                 by_rel: dict[str, QTreeWidgetItem] = {}
-                for relative_path, source, target in entries:
+                for relative_path, target_rel, source, target in entries:
                     will_overwrite = target.exists() and target.is_file()
                     is_extra_new = is_existing_target and not will_overwrite
+                    dim_pair = self._dimension_mismatches_ci.get(relative_path.casefold())
                     size_bytes = source.stat().st_size
                     child = QTreeWidgetItem(parent)
                     child.setText(0, Path(relative_path).name)
                     child.setText(1, target.as_posix())
                     child.setToolTip(1, target.as_posix())
-                    if is_extra_new:
+                    if dim_pair is not None:
+                        (sw, sh), (tw, th) = dim_pair
+                        prefix = "覆盖" if will_overwrite else "新增"
+                        child.setText(2, f"{prefix} · ⚠尺寸变")
+                        child.setForeground(2, DIM_MISMATCH_FG)
+                        child.setFont(2, bold_font)
+                        child.setToolTip(2, f"尺寸不一致预警：来源 {sw}×{sh} ≠ 目标 {tw}×{th}")
+                    elif is_extra_new:
                         child.setText(2, "新增 · 多出")
                         child.setForeground(2, self._extra_fg)
                         child.setFont(2, bold_font)
@@ -254,24 +308,29 @@ class TransferPreviewDialog(QDialog):
                     child.setData(0, Qt.UserRole, relative_path)
                     child.setData(2, Qt.UserRole, will_overwrite)
                     child.setData(2, ROLE_EXTRA_NEW, is_extra_new)
+                    child.setData(2, ROLE_DIM_MISMATCH, dim_pair is not None)
                     child.setData(3, Qt.UserRole, size_bytes)
-                    child.setToolTip(0, relative_path)
+                    child.setToolTip(
+                        0,
+                        f"来源: {relative_path}\n目标: {target_rel}" if target_rel != relative_path else relative_path,
+                    )
                     child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
                     child.setCheckState(0, Qt.Checked)
                     by_rel[relative_path] = child
 
-                by_rel_ci = {rel_key.casefold(): item for rel_key, item in by_rel.items()}
-                for rel_key, item in by_rel.items():
-                    rel_obj = Path(rel_key)
-                    lower = rel_obj.name.lower()
-                    if not lower.endswith(ATLAS_PNG):
-                        continue
-                    stem = rel_obj.name[: -len(ATLAS_PNG)]
-                    partner_rel = (rel_obj.parent / f"{stem}{ATLAS_PLIST}").as_posix()
-                    partner_item = by_rel_ci.get(partner_rel.casefold())
-                    if partner_item is not None:
-                        self._atlas_companions[item] = partner_item
-                        self._atlas_companions[partner_item] = item
+                if self._expand_atlas:
+                    by_rel_ci = {rel_key.casefold(): item for rel_key, item in by_rel.items()}
+                    for rel_key, item in by_rel.items():
+                        rel_obj = Path(rel_key)
+                        lower = rel_obj.name.lower()
+                        if not lower.endswith(ATLAS_PNG):
+                            continue
+                        stem = rel_obj.name[: -len(ATLAS_PNG)]
+                        partner_rel = (rel_obj.parent / f"{stem}{ATLAS_PLIST}").as_posix()
+                        partner_item = by_rel_ci.get(partner_rel.casefold())
+                        if partner_item is not None:
+                            self._atlas_companions[item] = partner_item
+                            self._atlas_companions[partner_item] = item
         finally:
             self._updating_checks = False
 
@@ -322,6 +381,7 @@ class TransferPreviewDialog(QDialog):
         total_bytes = 0
         extra_new_count = 0
         extra_action_count = 0
+        dim_mismatch_count = 0
         bold_font = QFont(self.tree.font())
         bold_font.setBold(True)
         for group_index in range(self.tree.topLevelItemCount()):
@@ -338,6 +398,8 @@ class TransferPreviewDialog(QDialog):
                     overwrite_count += 1
                 if bool(child.data(2, ROLE_EXTRA_NEW)):
                     group_extra += 1
+                if bool(child.data(2, ROLE_DIM_MISMATCH)):
+                    dim_mismatch_count += 1
                 total_bytes += int(child.data(3, Qt.UserRole) or 0)
             action_count += int(group_has_selection)
             extra_new_count += group_extra
@@ -353,8 +415,9 @@ class TransferPreviewDialog(QDialog):
                 group.setData(2, Qt.FontRole, None)
                 group.setToolTip(2, "")
         new_count = file_count - overwrite_count
+        group_unit = "个分组" if self._ui_mode else "个动作"
         self.info_label.setText(
-            f"将传输 {action_count} 个动作 · {file_count} 个文件（覆盖 {overwrite_count} · 新增 {new_count}）· {self._format_size(total_bytes)}"
+            f"将传输 {action_count} {group_unit} · {file_count} 个文件（覆盖 {overwrite_count} · 新增 {new_count}）· {self._format_size(total_bytes)}"
         )
         if not self._backup_enabled:
             self.backup_hint_label.setText("传输前备份：未开启（可在顶部工具条勾选“传输前备份zip”）")
@@ -374,6 +437,14 @@ class TransferPreviewDialog(QDialog):
         else:
             self.extra_warning_label.clear()
             self.extra_warning_label.setVisible(False)
+        if dim_mismatch_count > 0:
+            self.dimension_warning_label.setText(
+                f"⚠ 尺寸不一致预警：已勾选的文件中有 {dim_mismatch_count} 张图片的分辨率与目标旧图不同，请确认切图规格无误。"
+            )
+            self.dimension_warning_label.setVisible(True)
+        else:
+            self.dimension_warning_label.clear()
+            self.dimension_warning_label.setVisible(False)
         self.confirm_button.setEnabled(file_count > 0)
 
     @staticmethod

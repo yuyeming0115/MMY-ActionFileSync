@@ -24,6 +24,9 @@ class PreviewService:
         if node.node_type == "atlas":
             return self._build_atlas_preview(side, relative_path, node, source_dir)
 
+        if node.node_type == "ui_asset":
+            return self._build_ui_preview(side, relative_path, node, source_dir)
+
         if node.node_type == "image":
             width, height, _ = self._read_image_meta(source_dir)
             return PreviewItem(side=side, relative_path=relative_path, source_path=str(source_dir), cache_path=str(source_dir), frame_paths=[str(source_dir)], frame_count=1, width=width, height=height, status="ready", message="单帧图片")
@@ -89,6 +92,51 @@ class PreviewService:
             height=height,
             status="ready",
             message=" · ".join(notes),
+        )
+
+    def _build_ui_preview(self, side: str, relative_path: str, node: TreeNode, source_file: Path) -> PreviewItem:
+        extra = node.extra or {}
+        if not extra.get("is_image", True):
+            ext = source_file.suffix or "无扩展名"
+            return PreviewItem(
+                side=side,
+                relative_path=relative_path,
+                source_path=str(source_file),
+                cache_path=None,
+                status="not_previewable",
+                message=f"非图片文件 ({ext})，支持对比与传输",
+            )
+        if not source_file.exists() or not source_file.is_file():
+            return PreviewItem(
+                side=side,
+                relative_path=relative_path,
+                source_path=str(source_file),
+                cache_path=None,
+                status="error",
+                message="图片文件不存在，无法预览",
+            )
+        try:
+            width, height, _ = self._read_image_meta(source_file)
+        except Exception:  # noqa: BLE001
+            return PreviewItem(
+                side=side,
+                relative_path=relative_path,
+                source_path=str(source_file),
+                cache_path=None,
+                status="error",
+                message="图片无法读取，无法预览",
+            )
+        return PreviewItem(
+            side=side,
+            relative_path=relative_path,
+            source_path=str(source_file),
+            cache_path=str(source_file),
+            frame_paths=[str(source_file)],
+            frame_count=1,
+            width=width,
+            height=height,
+            status="ready",
+            message="UI 单图",
         )
 
     def _read_image_meta(self, image_path: Path) -> tuple[int, int, int]:
